@@ -848,7 +848,7 @@ sub SIRD_StartStatus($)
   } 
   else 
   {
-    Log3 $hash->{NAME}, 3, $hash->{NAME}.' blocking call already running';
+    Log3 $hash->{NAME}, 5, $hash->{NAME}.' blocking call already running';
     
     RemoveInternalTimer($hash);
     InternalTimer(gettimeofday() + $hash->{INTERVAL}, "SIRD_StartStatus", $hash, 0);
@@ -1122,8 +1122,6 @@ sub SIRD_EndStatus($)
   readingsBulkUpdate($hash, 'inputSelectable', exists($status{'input2'}) ? $status{'input2'} : ' ');
   readingsEndUpdate($hash, 1);
 
-  SIRD_refresh("WEB");  
-  
   delete($hash->{helper}{RUNNING_PID});
 }
 
@@ -2464,15 +2462,11 @@ sub SIRD_Input($$)
                       my $select1 = substr($responseXMLinput,$listpos1,$listpos3);
                       my $listName1 = substr($responseXMLinput,$listNamePos1,$listNamePos3);
                       $listName1 = SIRD_space2sub ($listName1);
-                      if ($select1 == '1' ) {
-                        $listName2 .= "<".$listName1.">";
-                      }
-                      if ( $listName3 ne "" && $select1 == '1') {
+                      $listName2 .= "<".$listName1.">";
+                      if ( $listName3 ne "") {
                         $listName3 .= ",";
                       }
-                      if ($select1 == '1' ) {
-                        $listName3 .= $listName1;
-                      }
+                      $listName3 .= $listName1;
                       $listpos1 = '0';
                       $listpos2 = '0';
                       $listNamePos1 = '0';
