@@ -6,6 +6,7 @@ use strict;
 use warnings;
 use HttpUtils;
 use Encode;
+use Blocking;
 use JSON;
 use XML::Simple qw(:strict);
 use Time::HiRes qw(gettimeofday sleep);
