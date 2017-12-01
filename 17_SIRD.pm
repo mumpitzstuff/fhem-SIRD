@@ -183,15 +183,15 @@ sub SIRD_Set($$@) {
   {
     SIRD_SendRequest($hash, 'CREATE_SESSION', '', 0, \&SIRD_ParseLogin);
   }
-  elsif ('power' eq $cmd)
+  elsif ($cmd =~ /^(?:on|off)$/)
   {
-    SIRD_SendRequest($hash, 'SET', 'netRemote.sys.power', ('on' eq $arg ? 1 : 0), \&SIRD_ParsePower);
+    SIRD_SendRequest($hash, 'SET', 'netRemote.sys.power', ('on' eq $cmd ? 1 : 0), \&SIRD_ParsePower);
   }
-  elsif ('play' eq $cmd)
+  elsif ($cmd =~ /^(?:stop|play|pause|next|previous)$/)
   {
     my $playCommands = AttrVal($name, 'playCommands', '0:stop,1:play,2:pause,3:next,4:previous');
     
-    if ($playCommands =~ /([0-9])\:$arg/)
+    if ($playCommands =~ /([0-9])\:$cmd/)
     {
       SIRD_SendRequest($hash, 'SET', 'netRemote.play.control', $1, \&SIRD_ParsePlay);
     }
@@ -214,9 +214,17 @@ sub SIRD_Set($$@) {
   {
     SIRD_SendRequest($hash, 'SET', 'netRemote.sys.audio.volume', int($arg / 5), \&SIRD_ParseVolume);
   }
+  elsif ('volumeStraight' eq $cmd)
+  {
+    SIRD_SendRequest($hash, 'SET', 'netRemote.sys.audio.volume', int($arg), \&SIRD_ParseVolume);
+  }
   elsif ('mute' eq $cmd)
   {
-    SIRD_SendRequest($hash, 'SET', 'netRemote.sys.audio.mute', ('on' eq $arg ? 1 : 0), \&SIRD_ParseMute);
+    $_ = 1 if ('on' eq $arg);
+    $_ = 0 if ('off' eq $arg);
+    $_ = ('on' eq ReadingsVal($name, 'mute', 'off') ? 0 : 1) if ('toggle' eq $arg);
+    
+    SIRD_SendRequest($hash, 'SET', 'netRemote.sys.audio.mute', $_, \&SIRD_ParseMute);
   }
   elsif ('shuffle' eq $cmd)
   {
@@ -226,13 +234,19 @@ sub SIRD_Set($$@) {
   {
     SIRD_SendRequest($hash, 'SET', 'netRemote.play.repeat', ('on' eq $arg ? 1 : 0), \&SIRD_ParseRepeat);
   }
+  elsif ('statusRequest' eq $cmd)
+  {
+    SIRD_Update($hash);
+  }
   else 
   {
-    my $list = 'login:noArg power:on,off mute:on,off shuffle:on,off repeat:on,off play:stop,play,pause,next,previous '.
-               'volume:slider,0,1,100 input:'.$inputs.' preset:'.$presets;
+    my $list = 'login:noArg on:noArg off:noArg mute:on,off,toggle shuffle:on,off repeat:on,off stop:noArg play:noArg pause:noArg next:noArg previous:noArg '.
+               'volume:slider,0,1,100 volumeStraight:slider,0,1,20 statusRequest:noArg input:'.$inputs.' preset:'.$presets;
       
     return 'Unknown argument '.$cmd.', choose one of '.$list;
   }
+  
+  SIRD_Update($hash);
 
   return undef;
 }
@@ -345,7 +359,14 @@ sub SIRD_Update($)
     readingsEndUpdate($hash, 1);
   }
   
-  readingsSingleUpdate($hash, 'state', 'active', 1);
+  if ('' eq ReadingsVal($name, 'power', ''))
+  {
+    readingsSingleUpdate($hash, 'state', 'absent', 1);
+  }
+  else
+  {
+    readingsSingleUpdate($hash, 'state', ReadingsVal($name, 'power', ''), 1);
+  }
 }
 
 
@@ -353,23 +374,24 @@ sub SIRD_ClearReadings($)
 {
   my ($hash) = @_;
   
-  readingsBulkUpdate($hash, 'infoName', '');
-  readingsBulkUpdate($hash, 'infoDescription', '');
-  readingsBulkUpdate($hash, 'infoAlbumDescription', '');
-  readingsBulkUpdate($hash, 'infoArtistDescription', '');
-  readingsBulkUpdate($hash, 'infoDuration', '');
-  readingsBulkUpdate($hash, 'infoArtist', '');
-  readingsBulkUpdate($hash, 'infoAlbum', '');
-  readingsBulkUpdate($hash, 'infoGraphicUri', '');
+  readingsBulkUpdate($hash, 'currentTitle', '');
+  readingsBulkUpdate($hash, 'description', '');
+  readingsBulkUpdate($hash, 'currentAlbumDescription', '');
+  readingsBulkUpdate($hash, 'currentArtistDescription', '');
+  readingsBulkUpdate($hash, 'duration', '');
+  readingsBulkUpdate($hash, 'currentArtist', '');
+  readingsBulkUpdate($hash, 'currentAlbum', '');
+  readingsBulkUpdate($hash, 'graphicUri', '');
   readingsBulkUpdate($hash, 'infoText', '');
-  readingsBulkUpdate($hash, 'infoFriendlyName', '');
-  readingsBulkUpdate($hash, 'infoVersion', '');
-  readingsBulkUpdate($hash, 'play', '');
+  readingsBulkUpdate($hash, 'friendlyName', '');
+  readingsBulkUpdate($hash, 'version', '');
+  readingsBulkUpdate($hash, 'playStatus', '');
   readingsBulkUpdate($hash, 'errorStr', '');
   readingsBulkUpdate($hash, 'position', '');
   readingsBulkUpdate($hash, 'repeat', '');
   readingsBulkUpdate($hash, 'shuffle', '');
   readingsBulkUpdate($hash, 'volume', '');
+  readingsBulkUpdate($hash, 'volumeStraight', '');
   readingsBulkUpdate($hash, 'mute', '');
   readingsBulkUpdate($hash, 'input', '');
 }
@@ -382,35 +404,35 @@ sub SIRD_SetReadings($)
 
   if ('netRemote.play.info.name' eq $_->{node})
   {
-    readingsBulkUpdate($hash, 'infoName', encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : ''));
+    readingsBulkUpdate($hash, 'currentTitle', encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : ''));
   }
   elsif ('netRemote.play.info.description' eq $_->{node})
   {
-    readingsBulkUpdate($hash, 'infoDescription', encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : ''));
+    readingsBulkUpdate($hash, 'description', encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : ''));
   }
   elsif ('netRemote.play.info.albumDescription' eq $_->{node})
   {
-    readingsBulkUpdate($hash, 'infoAlbumDescription', encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : ''));
+    readingsBulkUpdate($hash, 'currentAlbumDescription', encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : ''));
   }
   elsif ('netRemote.play.info.artistDescription' eq $_->{node})
   {
-    readingsBulkUpdate($hash, 'infoArtistDescription', encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : ''));
+    readingsBulkUpdate($hash, 'currentArtistDescription', encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : ''));
   }
   elsif ('netRemote.play.info.duration' eq $_->{node})
   {
-    readingsBulkUpdate($hash, 'infoDuration', $_->{value}->{u32});
+    readingsBulkUpdate($hash, 'duration', $_->{value}->{u32});
   }
   elsif ('netRemote.play.info.artist' eq $_->{node})
   {
-    readingsBulkUpdate($hash, 'infoArtist', encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : ''));
+    readingsBulkUpdate($hash, 'currentArtist', encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : ''));
   }
   elsif ('netRemote.play.info.album' eq $_->{node})
   {
-    readingsBulkUpdate($hash, 'infoAlbum', encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : ''));
+    readingsBulkUpdate($hash, 'currentAlbum', encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : ''));
   }
   elsif ('netRemote.play.info.graphicUri' eq $_->{node})
   {
-    readingsBulkUpdate($hash, 'infoGraphicUri', encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : ''));
+    readingsBulkUpdate($hash, 'graphicUri', encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : ''));
   }
   elsif ('netRemote.play.info.text' eq $_->{node})
   {
@@ -418,11 +440,11 @@ sub SIRD_SetReadings($)
   }
   elsif ('netRemote.sys.info.version' eq $_->{node})
   {
-    readingsBulkUpdate($hash, 'infoVersion', encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : ''));
+    readingsBulkUpdate($hash, 'version', encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : ''));
   }
   elsif ('netRemote.sys.info.friendlyName' eq $_->{node})
   {
-    readingsBulkUpdate($hash, 'infoFriendlyName', encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : ''));
+    readingsBulkUpdate($hash, 'friendlyName', encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : ''));
   }
   elsif ('netRemote.sys.mode' eq $_->{node})
   {
@@ -437,7 +459,7 @@ sub SIRD_SetReadings($)
   {
     my @result = ('idle', 'buffering', 'playing', 'paused', 'rebuffering', 'error', 'stopped');
 
-    readingsBulkUpdate($hash, 'play', ($_->{value}->{u8} < 7 ? $result[$_->{value}->{u8}] : 'unknown'));
+    readingsBulkUpdate($hash, 'playStatus', ($_->{value}->{u8} < 7 ? $result[$_->{value}->{u8}] : 'unknown'));
   }
   elsif ('netRemote.play.errorStr' eq $_->{node})
   {
@@ -460,7 +482,8 @@ sub SIRD_SetReadings($)
   }
   elsif ('netRemote.sys.audio.volume' eq $_->{node})
   {
-    readingsBulkUpdate($hash, 'volume', int($_->{value}->{u8} * 5)) if (int(ReadingsVal($name, 'volume', -1)) != int($_->{value}->{u8} * 5));
+    readingsBulkUpdate($hash, 'volume', int($_->{value}->{u8} * 5)) if (int(ReadingsVal($name, 'volume', '-1')) != int($_->{value}->{u8} * 5));
+    readingsBulkUpdate($hash, 'volumeStraight', int($_->{value}->{u8})) if (int(ReadingsVal($name, 'volumeStraight', '-1')) != int($_->{value}->{u8}));
   }
   elsif ('netRemote.sys.audio.mute' eq $_->{node})
   {
@@ -562,6 +585,10 @@ sub SIRD_ParseNotifies($$$)
       
       readingsEndUpdate($hash, 1);
     }
+    else
+    {
+      Log3 $name, 3, $name.': Notifies '.$param->{cmd}.' failed.';
+    }
   }
 }
 
@@ -630,6 +657,10 @@ sub SIRD_ParseLogin($$$)
     
       $hash->{helper}{sid} = $xml->{sessionId};
     }
+    else
+    {
+      Log3 $name, 3, $name.': Login failed.';
+    }
   }
 }
 
@@ -658,15 +689,18 @@ sub SIRD_ParsePower($$$)
       if ('GET' eq $param->{cmd})
       {
         readingsSingleUpdate($hash, 'power', (1 == $xml->{value}->{u8} ? 'on' : 'off'), 1);
+        readingsSingleUpdate($hash, 'presence', 'present', 1);
       }
       elsif ('SET' eq $param->{cmd})
       {
         readingsSingleUpdate($hash, 'power', (1 == $param->{value} ? 'on' : 'off'), 1);
+        readingsSingleUpdate($hash, 'presence', 'present', 1);
       }
     }
     else
     {
-      readingsSingleUpdate($hash, 'power', 'absent', 1);
+      readingsSingleUpdate($hash, 'power', '', 1);
+      readingsSingleUpdate($hash, 'presence', 'absent', 1);
       
       if (1 == AttrVal($name, 'autoLogin', 0))
       {
@@ -703,24 +737,24 @@ sub SIRD_ParsePlay($$$)
       {
         my @result = ('idle', 'buffering', 'playing', 'paused', 'rebuffering', 'error', 'stopped');
         
-        readingsSingleUpdate($hash, 'play', ($xml->{value}->{u8} < 7 ? $result[$xml->{value}->{u8}] : 'unknown'), 1);
+        readingsSingleUpdate($hash, 'playStatus', ($xml->{value}->{u8} < 7 ? $result[$xml->{value}->{u8}] : 'unknown'), 1);
       }
       elsif ('SET' eq $param->{cmd})
       {
         my @result = ('stopped', 'buffering', 'paused', 'buffering', 'buffering');
         
-        readingsSingleUpdate($hash, 'play', ($param->{value} < 5 ? $result[$param->{value}] : 'error'), 1);
+        readingsSingleUpdate($hash, 'playStatus', ($param->{value} < 5 ? $result[$param->{value}] : 'error'), 1);
       }
     }
     else
     {
       if ('GET' eq $param->{cmd})
       {
-        readingsSingleUpdate($hash, 'play', 'error', 1);
+        readingsSingleUpdate($hash, 'playStatus', 'error', 1);
       }
       elsif ('SET' eq $param->{cmd})
       {
-        readingsSingleUpdate($hash, 'play', 'not supported', 1);
+        readingsSingleUpdate($hash, 'playStatus', 'not supported', 1);
       }
     }
   }
@@ -751,11 +785,17 @@ sub SIRD_ParseVolume($$$)
       if ('GET' eq $param->{cmd})
       {
         readingsSingleUpdate($hash, 'volume', int($xml->{value}->{u8} * 5), 1);
+        readingsSingleUpdate($hash, 'volumeStraight', int($xml->{value}->{u8}), 1);
       }
       elsif ('SET' eq $param->{cmd})
       {
         readingsSingleUpdate($hash, 'volume', int($param->{value} * 5), 1);
+        readingsSingleUpdate($hash, 'volumeStraight', int($param->{value}), 1);
       }
+    }
+    else
+    {
+      Log3 $name, 3, $name.': Volume '.$param->{cmd}.' failed.';
     }
   }
 }
@@ -791,6 +831,10 @@ sub SIRD_ParseMute($$$)
         readingsSingleUpdate($hash, 'mute', (1 == $param->{value} ? 'on' : 'off'), 1);
       }
     }
+    else
+    {
+      Log3 $name, 3, $name.': Mute '.$param->{cmd}.' failed.';
+    }
   }
 }
 
@@ -824,6 +868,10 @@ sub SIRD_ParseShuffle($$$)
       {
         readingsSingleUpdate($hash, 'shuffle', (1 == $param->{value} ? 'on' : 'off'), 1);
       }
+    }
+    else
+    {
+      Log3 $name, 3, $name.': Shuffle '.$param->{cmd}.' failed.';
     }
   }
 }
@@ -859,6 +907,10 @@ sub SIRD_ParseRepeat($$$)
         readingsSingleUpdate($hash, 'repeat', (1 == $param->{value} ? 'on' : 'off'), 1);
       }
     }
+    else
+    {
+      Log3 $name, 3, $name.': Repeat '.$param->{cmd}.' failed.';
+    }
   }
 }
 
@@ -883,6 +935,10 @@ sub SIRD_ParseNavState($$$)
     if (!$@ && ('FS_OK' eq $xml->{status})) 
     {
       Log3 $name, 5, $name.': NavState '.$param->{cmd}.' successful.';
+    }
+    else
+    {
+      Log3 $name, 3, $name.': NavState '.$param->{cmd}.' failed.';
     }
   }
 }
@@ -927,7 +983,7 @@ sub SIRD_ParseInputs($$$)
           if (exists($item->{key}) && exists($item->{field}) && (5 == scalar(@{$item->{field}})) && !ref(@{$item->{field}}[2]->{c8_array})) 
           {
             $inputs .= ',' if ('' ne $inputs);
-            $inputs .= $item->{key}.':'.@{$item->{field}}[2]->{c8_array};
+            $inputs .= $item->{key}.':'.lc(@{$item->{field}}[2]->{c8_array});
           }       
         }
    
@@ -935,7 +991,11 @@ sub SIRD_ParseInputs($$$)
         
         readingsSingleUpdate($hash, 'inputs', $inputs, 1);
       }
-    }  
+    }
+    else
+    {
+      Log3 $name, 3, $name.': Inputs '.$param->{cmd}.' failed.';
+    }    
   }
 }
 
