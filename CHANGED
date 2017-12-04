@@ -1,0 +1,5 @@
+ - max volume fixed
+ - default for autoLogin changed to on
+ - readings inputs/presets hidden
+ - verbose level of some error messages changed from 3 to 5
+ - small help added 

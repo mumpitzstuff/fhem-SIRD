@@ -25,7 +25,7 @@ sub SIRD_Initialize($)
 
   $hash->{DefFn}    = 'SIRD_Define';
   $hash->{UndefFn}  = 'SIRD_Undefine';
-  $hash->{NotifyFn} = 'SIRD_Notify'; 
+  $hash->{NotifyFn} = 'SIRD_Notify';
   $hash->{SetFn}    = 'SIRD_Set';
   $hash->{GetFn}    = 'SIRD_Get';
   $hash->{AttrFn}   = 'SIRD_Attr';
@@ -42,19 +42,19 @@ sub SIRD_Define($$)
 {
   my ($hash, $def) = @_;
   my @args = split("[ \t][ \t]*", $def);
-  
+
   return 'Usage: define <name> SIRD <ip> <pin> <interval>'  if (@args < 4);
-  
+
   my ($name, $type, $ip, $pin, $interval) = @args;
   return 'Please enter a valid ip address ('.$ip.').' if ($ip !~ /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/);
   return 'Please enter a valid pin (4 digits).' if ($pin !~ /^\d\d\d\d$/);
   return 'The update interval must be a number and has to be at least 10s.' if (($interval !~ /^\d+$/) || ($interval < 10));
-  
+
   $hash->{NOTIFYDEV} = 'global';
   $hash->{IP} = $ip;
-  $hash->{PIN} = $pin;    
+  $hash->{PIN} = $pin;
   $hash->{INTERVAL} = $interval;
-  
+
   readingsSingleUpdate($hash, 'state', 'Initialized', 1);
 
   Log3 $name, 3, $name.' defined with ip '.$ip.' and interval '.$interval;
@@ -66,10 +66,10 @@ sub SIRD_Define($$)
 sub SIRD_Undefine($$)
 {
   my ($hash, $arg) = @_;
-  
+
   RemoveInternalTimer($hash);
   HttpUtils_Close($hash);
-  
+
   return undef;
 }
 
@@ -78,10 +78,10 @@ sub SIRD_Notify($$)
 {
   my ($hash, $dev) = @_;
   my $name = $hash->{NAME};
-  
+
   return if (!grep(m/^INITIALIZED|REREADCFG$/, @{$dev->{CHANGED}}));
 
-  if (IsDisabled($name)) 
+  if (IsDisabled($name))
   {
     readingsSingleUpdate($hash, 'state', 'disabled', 0);
   }
@@ -89,16 +89,16 @@ sub SIRD_Notify($$)
   {
     SIRD_SetNextTimer($hash, int(rand(15)));
   }
-  
+
   return undef;
-} 
+}
 
 
 sub SIRD_Attr($$$$) {
   my ($command, $name, $attribute, $value) = @_;
   my $hash = $defs{$name};
 
-  if ('set' eq $command) 
+  if ('set' eq $command)
   {
     if ('disable' eq $attribute)
     {
@@ -109,7 +109,7 @@ sub SIRD_Attr($$$$) {
       else
       {
         SIRD_SetNextTimer($hash, 0);
-        
+
         readingsSingleUpdate($hash, 'state', 'Initialized', 1);
       }
     }
@@ -117,13 +117,13 @@ sub SIRD_Attr($$$$) {
     {
       my $fail = 0;
       my @playCommands = split('\s*,\s*' , $value);
-            
+
       if (5 == scalar(@playCommands))
       {
         foreach (@playCommands)
-        { 
+        {
           @_ = split('\s*:\s*', $_);
-          
+
           if ((2 != scalar(@_)) ||
               ($_[0] !~ /^[0-9]$/) ||
               ($_[1] !~ /^(?:stop|play|pause|next|previous)$/))
@@ -137,14 +137,14 @@ sub SIRD_Attr($$$$) {
       {
         $fail = 1;
       }
-      
+
       if ($fail)
       {
         return 'playCommands is required in format: <0-9>:stop,<0-9>:play,<0-9>:pause,<0-9>:next,<0-9>:previous';
       }
     }
-  }    
- 
+  }
+
   return undef;
 }
 
@@ -154,32 +154,33 @@ sub SIRD_Set($$@) {
   my ($cmd, $arg) = @aa;
   my $inputs = 'noArg';
   my $presets = 'noArg';
-  my $inputReading = ReadingsVal($name, 'inputs', undef);
-  my $presetReading = ReadingsVal($name, 'presets', undef);
-  
+  my $inputReading = ReadingsVal($name, '.inputs', undef);
+  my $presetReading = ReadingsVal($name, '.presets', undef);
+  my $volumeSteps = ReadingsNum($name, '.volumeSteps', 20);
+
   if (defined($inputReading))
   {
     $inputs = '';
-    
+
     while ($inputReading =~ /\d+:(.*?)(?:,|$)/g)
     {
       $inputs .= ',' if ('' ne $inputs);
       $inputs .= $1;
     }
   }
-  
+
   if (defined($presetReading))
   {
     $presets = '';
-    
+
     while ($presetReading =~ /\d+:(.*?)(?:,|$)/g)
     {
       $presets .= ',' if ('' ne $presets);
       $presets .= $1;
     }
   }
-    
-  if ('login' eq $cmd) 
+
+  if ('login' eq $cmd)
   {
     SIRD_SendRequest($hash, 'CREATE_SESSION', '', 0, \&SIRD_ParseLogin);
   }
@@ -190,7 +191,7 @@ sub SIRD_Set($$@) {
   elsif ($cmd =~ /^(?:stop|play|pause|next|previous)$/)
   {
     my $playCommands = AttrVal($name, 'playCommands', '0:stop,1:play,2:pause,3:next,4:previous');
-    
+
     if ($playCommands =~ /([0-9])\:$cmd/)
     {
       SIRD_SendRequest($hash, 'SET', 'netRemote.play.control', $1, \&SIRD_ParsePlay);
@@ -212,7 +213,9 @@ sub SIRD_Set($$@) {
   }
   elsif ('volume' eq $cmd)
   {
-    SIRD_SendRequest($hash, 'SET', 'netRemote.sys.audio.volume', int($arg / 5), \&SIRD_ParseVolume);
+     my $volumeSteps = ReadingsNum($name, '.volumeSteps', 20);
+
+    SIRD_SendRequest($hash, 'SET', 'netRemote.sys.audio.volume', int($arg) / (100 / int($volumeSteps)), \&SIRD_ParseVolume);
   }
   elsif ('volumeStraight' eq $cmd)
   {
@@ -223,7 +226,7 @@ sub SIRD_Set($$@) {
     $_ = 1 if ('on' eq $arg);
     $_ = 0 if ('off' eq $arg);
     $_ = ('on' eq ReadingsVal($name, 'mute', 'off') ? 0 : 1) if ('toggle' eq $arg);
-    
+
     SIRD_SendRequest($hash, 'SET', 'netRemote.sys.audio.mute', $_, \&SIRD_ParseMute);
   }
   elsif ('shuffle' eq $cmd)
@@ -236,16 +239,16 @@ sub SIRD_Set($$@) {
   }
   elsif ('statusRequest' eq $cmd)
   {
-    SIRD_Update($hash);
+    # do nothing here (readings already refreshed at the end)
   }
-  else 
+  else
   {
     my $list = 'login:noArg on:noArg off:noArg mute:on,off,toggle shuffle:on,off repeat:on,off stop:noArg play:noArg pause:noArg next:noArg previous:noArg '.
-               'volume:slider,0,1,100 volumeStraight:slider,0,1,20 statusRequest:noArg input:'.$inputs.' preset:'.$presets;
-      
+               'volume:slider,0,1,100 volumeStraight:slider,0,1,'.$volumeSteps.' statusRequest:noArg input:'.$inputs.' preset:'.$presets;
+
     return 'Unknown argument '.$cmd.', choose one of '.$list;
   }
-  
+
   SIRD_Update($hash);
 
   return undef;
@@ -255,21 +258,21 @@ sub SIRD_Set($$@) {
 sub SIRD_Get($$@) {
   my ($hash, $name, @aa) = @_;
   my ($cmd, $arg) = @aa;
-    
-  if ('inputs' eq $cmd) 
+
+  if ('inputs' eq $cmd)
   {
     SIRD_SendRequest($hash, 'LIST_GET_NEXT', 'netRemote.sys.caps.validModes/-1', 65536, \&SIRD_ParseInputs);
   }
-  elsif ('presets' eq $cmd) 
+  elsif ('presets' eq $cmd)
   {
     SIRD_SendRequest($hash, 'LIST_GET_NEXT', 'netRemote.nav.presets/-1', 20, \&SIRD_ParsePresets);
   }
-  else 
+  else
   {
     my $list = 'inputs:noArg presets:noArg';
-      
+
     return 'Unknown argument '.$cmd.', choose one of '.$list;
-  }    
+  }
 
   return undef;
 }
@@ -279,11 +282,11 @@ sub SIRD_SetNextTimer($$)
 {
   my ($hash, $timer) = @_;
   my $name = $hash->{NAME};
-  
+
   Log3 $name, 5, $name.': SetNextTimer called';
-  
+
   RemoveInternalTimer($hash);
-  
+
   if (!defined($timer))
   {
     InternalTimer(gettimeofday() + InternalVal($name, 'INTERVAL', 30), 'SIRD_Update', $hash, 0);
@@ -301,11 +304,11 @@ sub SIRD_Update($)
   my $name = $hash->{NAME};
 
   return undef if (IsDisabled($name));
-  
+
   SIRD_SetNextTimer($hash, undef);
 
   SIRD_SendRequest($hash, 'GET', 'netRemote.sys.power', 0, \&SIRD_ParsePower);
-  if (!defined(ReadingsVal($name, 'inputs', undef)))
+  if (!defined(ReadingsVal($name, '.inputs', undef)))
   {
     SIRD_SendRequest($hash, 'LIST_GET_NEXT', 'netRemote.sys.caps.validModes/-1', 65536, \&SIRD_ParseInputs);
   }
@@ -318,7 +321,7 @@ sub SIRD_Update($)
                                           'node=netRemote.sys.info.version&'.
                                           'node=netRemote.sys.info.friendlyName&', 0, \&SIRD_ParseMultiple);
   SIRD_SendRequest($hash, 'LIST_GET_NEXT', 'netRemote.nav.presets/-1', 20, \&SIRD_ParsePresets);
- 
+
   if ('on' eq ReadingsVal($name, 'power', 'unknown'))
   {
     SIRD_SendRequest($hash, 'GET_MULTIPLE', 'node=netRemote.play.info.name&'.
@@ -341,7 +344,7 @@ sub SIRD_Update($)
                                             'node=netRemote.sys.caps.volumeSteps&'.
                                             'node=netRemote.sys.audio.volume&'.
                                             'node=netRemote.sys.audio.mute&', 0, \&SIRD_ParseMultiple);
-                                            
+
     #SIRD_SendRequest($hash, 'GET_MULTIPLE', 'node=netRemote.multiroom.group.name&'.
     #                                        'node=netRemote.multiroom.group.id&'.
     #                                        'node=netRemote.multiroom.group.state&'.
@@ -358,7 +361,7 @@ sub SIRD_Update($)
     SIRD_ClearReadings($hash);
     readingsEndUpdate($hash, 1);
   }
-  
+
   if ('' eq ReadingsVal($name, 'power', ''))
   {
     readingsSingleUpdate($hash, 'state', 'absent', 1);
@@ -373,7 +376,7 @@ sub SIRD_Update($)
 sub SIRD_ClearReadings($)
 {
   my ($hash) = @_;
-  
+
   readingsBulkUpdate($hash, 'currentTitle', '');
   readingsBulkUpdate($hash, 'description', '');
   readingsBulkUpdate($hash, 'currentAlbumDescription', '');
@@ -448,10 +451,10 @@ sub SIRD_SetReadings($)
   }
   elsif ('netRemote.sys.mode' eq $_->{node})
   {
-    my $inputReading = ReadingsVal($name, 'inputs', '');
-        
+    my $inputReading = ReadingsVal($name, '.inputs', '');
+
     if ($inputReading =~ /$_->{value}->{u32}:(.*?)(?:,|$)/)
-    {        
+    {
       readingsBulkUpdate($hash, 'input', $1);
     }
   }
@@ -469,7 +472,7 @@ sub SIRD_SetReadings($)
   {
     my $minutes = $_->{value}->{u32} / 60000;
     my $seconds = ($_->{value}->{u32} / 1000) - (($_->{value}->{u32} / 60000) * 60);
-    
+
     readingsBulkUpdate($hash, 'position', sprintf("%d:%02d", $minutes, $seconds));
   }
   elsif ('netRemote.play.repeat' eq $_->{node})
@@ -480,10 +483,16 @@ sub SIRD_SetReadings($)
   {
     readingsBulkUpdate($hash, 'shuffle', (1 == $_->{value}->{u8} ? 'on' : 'off'));
   }
+  elsif ('netRemote.sys.caps.volumeSteps' eq $_->{node})
+  {
+    readingsBulkUpdate($hash, '.volumeSteps', ($_->{value}->{u8} > 20 && $_->{value}->{u8} < 99 ? $_->{value}->{u8} - 1 : 20));
+  }
   elsif ('netRemote.sys.audio.volume' eq $_->{node})
   {
-    readingsBulkUpdate($hash, 'volume', int($_->{value}->{u8} * 5)) if (int(ReadingsVal($name, 'volume', '-1')) != int($_->{value}->{u8} * 5));
-    readingsBulkUpdate($hash, 'volumeStraight', int($_->{value}->{u8})) if (int(ReadingsVal($name, 'volumeStraight', '-1')) != int($_->{value}->{u8}));
+    my $volumeSteps = ReadingsNum($name, '.volumeSteps', 20);
+
+    readingsBulkUpdate($hash, 'volume', int($_->{value}->{u8} * (100 / $volumeSteps))) if (ReadingsNum($name, 'volume', -1) ne $_->{value}->{u8} * (100 / $volumeSteps));
+    readingsBulkUpdate($hash, 'volumeStraight', $_->{value}->{u8}) if (ReadingsNum($name, 'volumeStraight', -1) ne $_->{value}->{u8});
   }
   elsif ('netRemote.sys.audio.mute' eq $_->{node})
   {
@@ -504,13 +513,13 @@ sub SIRD_SendRequest($$$$$)
   my $ip = InternalVal($name, 'IP', undef);
   my $pin = InternalVal($name, 'PIN', '1234');
   my $sid = '';
-  
+
   return undef if (IsDisabled($name));
-  
+
   if (defined($ip))
   {
     if ('GET' eq $cmd)
-    {    
+    {
       $_ = $cmd.'/'.$request.'?pin='.$pin;
     }
     elsif ('GET_MULTIPLE' eq $cmd)
@@ -521,7 +530,7 @@ sub SIRD_SendRequest($$$$$)
     {
       # it seems that sid should only be used to get notifications
       $sid = $hash->{helper}{sid} if (defined($hash->{helper}{sid}));
-      
+
       $_ = $cmd.'?pin='.$pin.'&sid='.$sid
     }
     elsif ('SET' eq $cmd)
@@ -536,7 +545,7 @@ sub SIRD_SendRequest($$$$$)
     {
       $_ = $cmd.'?pin='.$pin;
     }
-  
+
     my $param = {
                   url        => 'http://'.$ip.':80/fsapi/'.$_,
                   timeout    => 3,
@@ -561,20 +570,20 @@ sub SIRD_ParseNotifies($$$)
 
   if ('' ne $err)
   {
-    Log3 $name, 3, $name.': Error while requesting '.$param->{url}.' - '.$err;
+    Log3 $name, 5, $name.': Error while requesting '.$param->{url}.' - '.$err;
   }
   elsif ('' ne $data)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
     eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => ['notify']);};
-    
-    if (!$@ && ('FS_OK' eq $xml->{status}) && exists($xml->{notify})) 
+
+    if (!$@ && ('FS_OK' eq $xml->{status}) && exists($xml->{notify}))
     {
       Log3 $name, 5, $name.': Notifies '.$param->{cmd}.' successful.';
 
       readingsBeginUpdate($hash);
-      
+
       foreach (@{$xml->{notify}})
       {
         if (exists($_->{node}))
@@ -582,7 +591,7 @@ sub SIRD_ParseNotifies($$$)
           SIRD_SetReadings($hash);
         }
       }
-      
+
       readingsEndUpdate($hash, 1);
     }
     else
@@ -602,17 +611,17 @@ sub SIRD_ParseMultiple($$$)
 
   if ('' ne $err)
   {
-    Log3 $name, 3, $name.': Error while requesting '.$param->{url}.' - '.$err;
+    Log3 $name, 5, $name.': Error while requesting '.$param->{url}.' - '.$err;
   }
   elsif ('' ne $data)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
     eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => ['fsapiResponse']);};
-    
+
     readingsBeginUpdate($hash);
-    
-    if (!$@ && exists($xml->{fsapiResponse})) 
+
+    if (!$@ && exists($xml->{fsapiResponse}))
     {
       Log3 $name, 5, $name.': Multiple '.$param->{cmd}.' successful.';
 
@@ -621,14 +630,14 @@ sub SIRD_ParseMultiple($$$)
         if (exists($_->{node}) && exists($_->{status}) && exists($_->{value}) && ('FS_OK' eq $_->{status}))
         {
           SIRD_SetReadings($hash);
-        }        
+        }
       }
     }
     else
     {
       SIRD_ClearReadings($hash);
     }
-    
+
     readingsEndUpdate($hash, 1);
   }
 }
@@ -643,18 +652,18 @@ sub SIRD_ParseLogin($$$)
 
   if ('' ne $err)
   {
-    Log3 $name, 3, $name.': Error while requesting '.$param->{url}.' - '.$err;
+    Log3 $name, 5, $name.': Error while requesting '.$param->{url}.' - '.$err;
   }
   elsif ('' ne $data)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
     eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => []);};
-    
-    if (!$@ && ('FS_OK' eq $xml->{status})) 
+
+    if (!$@ && ('FS_OK' eq $xml->{status}))
     {
       Log3 $name, 5, $name.': Login successful.';
-    
+
       $hash->{helper}{sid} = $xml->{sessionId};
     }
     else
@@ -674,15 +683,15 @@ sub SIRD_ParsePower($$$)
 
   if ('' ne $err)
   {
-    Log3 $name, 3, $name.': Error while requesting '.$param->{url}.' - '.$err;
+    Log3 $name, 5, $name.': Error while requesting '.$param->{url}.' - '.$err;
   }
   elsif ('' ne $data)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
     eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => []);};
-    
-    if (!$@ && ('FS_OK' eq $xml->{status})) 
+
+    if (!$@ && ('FS_OK' eq $xml->{status}))
     {
       Log3 $name, 5, $name.': Power '.$param->{cmd}.' successful.';
 
@@ -701,8 +710,8 @@ sub SIRD_ParsePower($$$)
     {
       readingsSingleUpdate($hash, 'power', '', 1);
       readingsSingleUpdate($hash, 'presence', 'absent', 1);
-      
-      if (1 == AttrVal($name, 'autoLogin', 0))
+
+      if (1 == AttrVal($name, 'autoLogin', 1))
       {
         SIRD_SendRequest($hash, 'CREATE_SESSION', '', 0, \&SIRD_ParseLogin);
         #SIRD_SendRequest($hash, 'SET', 'netRemote.sys.info.controllerName', 'FHEM', \&SIRD_ParseController);
@@ -721,28 +730,28 @@ sub SIRD_ParsePlay($$$)
 
   if ('' ne $err)
   {
-    Log3 $name, 3, $name.': Error while requesting '.$param->{url}.' - '.$err;
+    Log3 $name, 5, $name.': Error while requesting '.$param->{url}.' - '.$err;
   }
   elsif ('' ne $data)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
     eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => []);};
-    
-    if (!$@ && ('FS_OK' eq $xml->{status})) 
+
+    if (!$@ && ('FS_OK' eq $xml->{status}))
     {
       Log3 $name, 5, $name.': Play '.$param->{cmd}.' successful.';
 
       if ('GET' eq $param->{cmd})
       {
         my @result = ('idle', 'buffering', 'playing', 'paused', 'rebuffering', 'error', 'stopped');
-        
+
         readingsSingleUpdate($hash, 'playStatus', ($xml->{value}->{u8} < 7 ? $result[$xml->{value}->{u8}] : 'unknown'), 1);
       }
       elsif ('SET' eq $param->{cmd})
       {
         my @result = ('stopped', 'buffering', 'paused', 'buffering', 'buffering');
-        
+
         readingsSingleUpdate($hash, 'playStatus', ($param->{value} < 5 ? $result[$param->{value}] : 'error'), 1);
       }
     }
@@ -770,15 +779,15 @@ sub SIRD_ParseVolume($$$)
 
   if ('' ne $err)
   {
-    Log3 $name, 3, $name.': Error while requesting '.$param->{url}.' - '.$err;
+    Log3 $name, 5, $name.': Error while requesting '.$param->{url}.' - '.$err;
   }
   elsif ('' ne $data)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
     eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => []);};
-    
-    if (!$@ && ('FS_OK' eq $xml->{status})) 
+
+    if (!$@ && ('FS_OK' eq $xml->{status}))
     {
       Log3 $name, 5, $name.': Volume '.$param->{cmd}.' successful.';
 
@@ -810,15 +819,15 @@ sub SIRD_ParseMute($$$)
 
   if ('' ne $err)
   {
-    Log3 $name, 3, $name.': Error while requesting '.$param->{url}.' - '.$err;
+    Log3 $name, 5, $name.': Error while requesting '.$param->{url}.' - '.$err;
   }
   elsif ('' ne $data)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
     eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => []);};
-    
-    if (!$@ && ('FS_OK' eq $xml->{status})) 
+
+    if (!$@ && ('FS_OK' eq $xml->{status}))
     {
       Log3 $name, 5, $name.': Mute '.$param->{cmd}.' successful.';
 
@@ -848,15 +857,15 @@ sub SIRD_ParseShuffle($$$)
 
   if ('' ne $err)
   {
-    Log3 $name, 3, $name.': Error while requesting '.$param->{url}.' - '.$err;
+    Log3 $name, 5, $name.': Error while requesting '.$param->{url}.' - '.$err;
   }
   elsif ('' ne $data)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
     eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => []);};
-    
-    if (!$@ && ('FS_OK' eq $xml->{status})) 
+
+    if (!$@ && ('FS_OK' eq $xml->{status}))
     {
       Log3 $name, 5, $name.': Shuffle '.$param->{cmd}.' successful.';
 
@@ -886,15 +895,15 @@ sub SIRD_ParseRepeat($$$)
 
   if ('' ne $err)
   {
-    Log3 $name, 3, $name.': Error while requesting '.$param->{url}.' - '.$err;
+    Log3 $name, 5, $name.': Error while requesting '.$param->{url}.' - '.$err;
   }
   elsif ('' ne $data)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
     eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => []);};
-    
-    if (!$@ && ('FS_OK' eq $xml->{status})) 
+
+    if (!$@ && ('FS_OK' eq $xml->{status}))
     {
       Log3 $name, 5, $name.': Repeat '.$param->{cmd}.' successful.';
 
@@ -924,15 +933,15 @@ sub SIRD_ParseNavState($$$)
 
   if ('' ne $err)
   {
-    Log3 $name, 3, $name.': Error while requesting '.$param->{url}.' - '.$err;
+    Log3 $name, 5, $name.': Error while requesting '.$param->{url}.' - '.$err;
   }
   elsif ('' ne $data)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
     eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => []);};
-    
-    if (!$@ && ('FS_OK' eq $xml->{status})) 
+
+    if (!$@ && ('FS_OK' eq $xml->{status}))
     {
       Log3 $name, 5, $name.': NavState '.$param->{cmd}.' successful.';
     }
@@ -953,49 +962,49 @@ sub SIRD_ParseInputs($$$)
 
   if ('' ne $err)
   {
-    Log3 $name, 3, $name.': Error while requesting '.$param->{url}.' - '.$err;
+    Log3 $name, 5, $name.': Error while requesting '.$param->{url}.' - '.$err;
   }
   elsif ('' ne $data)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
     eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => ['item']);};
-    
-    if (!$@ && ('FS_OK' eq $xml->{status})) 
+
+    if (!$@ && ('FS_OK' eq $xml->{status}))
     {
       if ('SET' eq $param->{cmd})
       {
-        my $inputReading = ReadingsVal($name, 'inputs', '');
-        
+        my $inputReading = ReadingsVal($name, '.inputs', '');
+
         if ($inputReading =~ /$param->{value}:(.*?)(?:,|$)/)
-        {        
+        {
           readingsSingleUpdate($hash, 'input', $1, 1);
         }
       }
       else
-      {      
+      {
         my $inputs = '';
-        
+
         Log3 $name, 5, $name.': Inputs '.$param->{cmd}.' successful.';
 
         foreach my $item (@{$xml->{item}})
         {
-          if (exists($item->{key}) && exists($item->{field}) && (5 == scalar(@{$item->{field}})) && !ref(@{$item->{field}}[2]->{c8_array})) 
+          if (exists($item->{key}) && exists($item->{field}) && (5 == scalar(@{$item->{field}})) && !ref(@{$item->{field}}[2]->{c8_array}))
           {
             $inputs .= ',' if ('' ne $inputs);
             $inputs .= $item->{key}.':'.lc(@{$item->{field}}[2]->{c8_array});
-          }       
+          }
         }
-   
+
         $inputs =~ s/\s//g;
-        
-        readingsSingleUpdate($hash, 'inputs', $inputs, 1);
+
+        readingsSingleUpdate($hash, '.inputs', $inputs, 1);
       }
     }
     else
     {
       Log3 $name, 3, $name.': Inputs '.$param->{cmd}.' failed.';
-    }    
+    }
   }
 }
 
@@ -1009,46 +1018,46 @@ sub SIRD_ParsePresets($$$)
 
   if ('' ne $err)
   {
-    Log3 $name, 3, $name.': Error while requesting '.$param->{url}.' - '.$err;
+    Log3 $name, 5, $name.': Error while requesting '.$param->{url}.' - '.$err;
   }
   elsif ('' ne $data)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
     eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => ['item']);};
-    
-    if (!$@ && ('FS_OK' eq $xml->{status})) 
+
+    if (!$@ && ('FS_OK' eq $xml->{status}))
     {
       if ('SET' eq $param->{cmd})
       {
-        my $presetReading = ReadingsVal($name, 'presets', '');
-        
+        my $presetReading = ReadingsVal($name, '.presets', '');
+
         if ($presetReading =~ /$param->{value}:(.*?)(?:,|$)/)
-        {        
+        {
           readingsSingleUpdate($hash, 'preset', $1, 1);
         }
       }
       else
-      {      
+      {
         my $presets = '';
-        
+
         Log3 $name, 5, $name.': Presets '.$param->{cmd}.' successful.';
 
         foreach my $item (@{$xml->{item}})
         {
-          if (exists($item->{key}) && exists($item->{field}) && !ref($item->{field}->{c8_array})) 
+          if (exists($item->{key}) && exists($item->{field}) && !ref($item->{field}->{c8_array}))
           {
             $_ = $item->{field}->{c8_array};
             $_ =~ s/(?:\:|,)//g;
-            
+
             $presets .= ',' if ('' ne $presets);
             $presets .= $item->{key}.':'.$_;
-          }       
+          }
         }
-   
+
         $presets =~ s/\s//g;
-        
-        readingsSingleUpdate($hash, 'presets', encode_utf8($presets), 1);
+
+        readingsSingleUpdate($hash, '.presets', encode_utf8($presets), 1);
       }
     }
     else
@@ -1056,9 +1065,9 @@ sub SIRD_ParsePresets($$$)
       if ('LIST_GET_NEXT' eq $param->{cmd})
       {
         readingsSingleUpdate($hash, 'preset', '', 1);
-        readingsSingleUpdate($hash, 'presets', '', 1);
+        readingsSingleUpdate($hash, '.presets', '', 1);
       }
-    }    
+    }
   }
 }
 
@@ -1071,6 +1080,59 @@ sub SIRD_ParsePresets($$$)
 <a name="SIRD"></a>
 <h3>SIRD</h3>
 
+<ul>
+  <u><b>Module for WLAN Radios with Frontier Silicon Chipset (Lidl (SilverCrest)/Aldi/Medion/Hama and many more...)</b></u>
+  <br><br>
+  tbd
+  <br><br>
+  <a name="SIRDinstallation"></a>
+  <b>Installation</b>
+  <ul><br>
+    tbd
+  </ul>
+  <br><br>
+  <a name="SIRDdefine"></a>
+  <b>Define</b>
+  <ul><br>
+    <code>define &lt;name&gt; SIRD &lt;ip&gt; &lt;pin&gt; &lt;interval&gt;</code>
+    <br><br>
+    Example:
+    <ul><br>
+      <code>define MySird SIRD 192.168.1.100 1234 10</code><br>
+    </ul>
+    <br>
+    tbd
+  </ul>
+  <br><br>
+  <a name="SIRDset"></a>
+  <b>Set</b>
+  <ul>
+    <li>login - Connects the radio and creates a new session. Not needed if autoLogin is activated (default).</li>
+    <li>stop - stop the playback</li>
+    <li>play - start the playback</li>
+    <li>pause - pause the playback</li>
+    <li>next - switch to next titel/station</li>
+    <li>previous - switch to previous titel/station</li>
+    <li>input - switch to another input</li>
+    <li>preset - switch to another preset</li>
+    <li>volume - set a new volume 0 - 100</li>
+    <li>volumeStraight - set a device specific volume 0 - X</li>
+    <li>mute - on/off/toggle</li>
+    <li>shuffle - on/off</li>
+    <li>repeat - on/off</li>
+    <li>statusRequest - update all readings</li>
+    <br>
+  </ul>
+  <br><br>
+  <a name="SIRDattribute"></a>
+  <b>Attributes</b>
+  <ul>
+    <li><b>disable:</b> disable the module (no update anymore)<br></li>
+    <li><b>autoLogin:</b> module tries to automatically login into the radio if needed (default: auto login activated)<br></li>
+    <li><b>playCommands:</b> can be used to define the mapping of play commands (default: 0:stop,1:play,2:pause,3:next,4:previous)<br></li>
+    <br>
+  </ul>
+</ul>
 
 =end html
 =cut
