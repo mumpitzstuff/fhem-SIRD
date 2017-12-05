@@ -376,27 +376,26 @@ sub SIRD_Update($)
 sub SIRD_ClearReadings($)
 {
   my ($hash) = @_;
+  my $name = $hash->{NAME};
 
-  readingsBulkUpdate($hash, 'currentTitle', '');
-  readingsBulkUpdate($hash, 'description', '');
-  readingsBulkUpdate($hash, 'currentAlbumDescription', '');
-  readingsBulkUpdate($hash, 'currentArtistDescription', '');
-  readingsBulkUpdate($hash, 'duration', '');
-  readingsBulkUpdate($hash, 'currentArtist', '');
-  readingsBulkUpdate($hash, 'currentAlbum', '');
-  readingsBulkUpdate($hash, 'graphicUri', '');
-  readingsBulkUpdate($hash, 'infoText', '');
-  readingsBulkUpdate($hash, 'friendlyName', '');
-  readingsBulkUpdate($hash, 'version', '');
-  readingsBulkUpdate($hash, 'playStatus', '');
-  readingsBulkUpdate($hash, 'errorStr', '');
-  readingsBulkUpdate($hash, 'position', '');
-  readingsBulkUpdate($hash, 'repeat', '');
-  readingsBulkUpdate($hash, 'shuffle', '');
-  readingsBulkUpdate($hash, 'volume', '');
-  readingsBulkUpdate($hash, 'volumeStraight', '');
-  readingsBulkUpdate($hash, 'mute', '');
-  readingsBulkUpdate($hash, 'input', '');
+  readingsBulkUpdate($hash, 'currentTitle', '') if ('' ne ReadingsVal($name, 'currentTitle', ''));
+  readingsBulkUpdate($hash, 'description', '') if ('' ne ReadingsVal($name, 'description', ''));
+  readingsBulkUpdate($hash, 'currentAlbumDescription', '') if ('' ne ReadingsVal($name, 'currentAlbumDescription', ''));
+  readingsBulkUpdate($hash, 'currentArtistDescription', '') if ('' ne ReadingsVal($name, 'currentArtistDescription', ''));
+  readingsBulkUpdate($hash, 'duration', '') if ('' ne ReadingsVal($name, 'duration', ''));
+  readingsBulkUpdate($hash, 'currentArtist', '') if ('' ne ReadingsVal($name, 'currentArtist', ''));
+  readingsBulkUpdate($hash, 'currentAlbum', '') if ('' ne ReadingsVal($name, 'currentAlbum', ''));
+  readingsBulkUpdate($hash, 'graphicUri', '') if ('' ne ReadingsVal($name, 'graphicUri', ''));
+  readingsBulkUpdate($hash, 'infoText', '') if ('' ne ReadingsVal($name, 'infoText', ''));
+  readingsBulkUpdate($hash, 'playStatus', '') if ('' ne ReadingsVal($name, 'playStatus', ''));
+  readingsBulkUpdate($hash, 'errorStr', '') if ('' ne ReadingsVal($name, 'errorStr', ''));
+  readingsBulkUpdate($hash, 'position', '') if ('' ne ReadingsVal($name, 'position', ''));
+  readingsBulkUpdate($hash, 'repeat', '') if ('' ne ReadingsVal($name, 'repeat', ''));
+  readingsBulkUpdate($hash, 'shuffle', '') if ('' ne ReadingsVal($name, 'shuffle', ''));
+  readingsBulkUpdate($hash, 'volume', '') if ('' ne ReadingsVal($name, 'volume', ''));
+  readingsBulkUpdate($hash, 'volumeStraight', '') if ('' ne ReadingsVal($name, 'volumeStraight', ''));
+  readingsBulkUpdate($hash, 'mute', '') if ('' ne ReadingsVal($name, 'mute', ''));
+  readingsBulkUpdate($hash, 'input', '') if ('' ne ReadingsVal($name, 'input', ''));
 }
 
 
@@ -404,50 +403,71 @@ sub SIRD_SetReadings($)
 {
   my ($hash) = @_;
   my $name = $hash->{NAME};
+  my $reading;
 
   if ('netRemote.play.info.name' eq $_->{node})
   {
-    readingsBulkUpdate($hash, 'currentTitle', encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : ''));
+    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
+    
+    readingsBulkUpdate($hash, 'currentTitle', $reading) if ($reading ne ReadingsVal($name, 'currentTitle', ''));
   }
   elsif ('netRemote.play.info.description' eq $_->{node})
   {
-    readingsBulkUpdate($hash, 'description', encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : ''));
+    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
+    
+    readingsBulkUpdate($hash, 'description', $reading) if ($reading ne ReadingsVal($name, 'description', ''));
   }
   elsif ('netRemote.play.info.albumDescription' eq $_->{node})
   {
-    readingsBulkUpdate($hash, 'currentAlbumDescription', encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : ''));
+    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
+    
+    readingsBulkUpdate($hash, 'currentAlbumDescription', $reading) if ($reading ne ReadingsVal($name, 'currentAlbumDescription', ''));
   }
   elsif ('netRemote.play.info.artistDescription' eq $_->{node})
   {
-    readingsBulkUpdate($hash, 'currentArtistDescription', encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : ''));
+    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
+    
+    readingsBulkUpdate($hash, 'currentArtistDescription', $reading) if ($reading ne ReadingsVal($name, 'currentArtistDescription', ''));
   }
   elsif ('netRemote.play.info.duration' eq $_->{node})
   {
-    readingsBulkUpdate($hash, 'duration', $_->{value}->{u32});
+    readingsBulkUpdate($hash, 'duration', $_->{value}->{u32}) if ($_->{value}->{u32} ne ReadingsVal($name, 'duration', ''));
   }
   elsif ('netRemote.play.info.artist' eq $_->{node})
   {
-    readingsBulkUpdate($hash, 'currentArtist', encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : ''));
+    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
+    
+    readingsBulkUpdate($hash, 'currentArtist', $reading) if ($reading ne ReadingsVal($name, 'currentArtist', ''));
   }
   elsif ('netRemote.play.info.album' eq $_->{node})
   {
-    readingsBulkUpdate($hash, 'currentAlbum', encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : ''));
+    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
+  
+    readingsBulkUpdate($hash, 'currentAlbum', $reading) if ($reading ne ReadingsVal($name, 'currentAlbum', ''));
   }
   elsif ('netRemote.play.info.graphicUri' eq $_->{node})
   {
-    readingsBulkUpdate($hash, 'graphicUri', encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : ''));
+    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
+  
+    readingsBulkUpdate($hash, 'graphicUri', $reading) if ($reading ne ReadingsVal($name, 'graphicUri', ''));
   }
   elsif ('netRemote.play.info.text' eq $_->{node})
   {
-    readingsBulkUpdate($hash, 'infoText', encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : ''));
+    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
+  
+    readingsBulkUpdate($hash, 'infoText', $reading) if ($reading ne ReadingsVal($name, 'infoText', ''));
   }
   elsif ('netRemote.sys.info.version' eq $_->{node})
   {
-    readingsBulkUpdate($hash, 'version', encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : ''));
+    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
+  
+    readingsBulkUpdate($hash, 'version', $reading) if ($reading ne ReadingsVal($name, 'version', ''));
   }
   elsif ('netRemote.sys.info.friendlyName' eq $_->{node})
   {
-    readingsBulkUpdate($hash, 'friendlyName', encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : ''));
+    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
+  
+    readingsBulkUpdate($hash, 'friendlyName', $reading) if ($reading ne ReadingsVal($name, 'friendlyName', ''));
   }
   elsif ('netRemote.sys.mode' eq $_->{node})
   {
@@ -461,27 +481,35 @@ sub SIRD_SetReadings($)
   elsif ('netRemote.play.status' eq $_->{node})
   {
     my @result = ('idle', 'buffering', 'playing', 'paused', 'rebuffering', 'error', 'stopped');
+    $reading = ($_->{value}->{u8} < 7 ? $result[$_->{value}->{u8}] : 'unknown');
 
-    readingsBulkUpdate($hash, 'playStatus', ($_->{value}->{u8} < 7 ? $result[$_->{value}->{u8}] : 'unknown'));
+    readingsBulkUpdate($hash, 'playStatus', $reading) if ($reading ne ReadingsVal($name, 'playStatus', ''));
   }
   elsif ('netRemote.play.errorStr' eq $_->{node})
   {
-    readingsBulkUpdate($hash, 'errorStr', encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : ''));
+    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
+  
+    readingsBulkUpdate($hash, 'errorStr', $reading) if ($reading ne ReadingsVal($name, 'errorStr', ''));
   }
   elsif ('netRemote.play.position' eq $_->{node})
   {
     my $minutes = $_->{value}->{u32} / 60000;
     my $seconds = ($_->{value}->{u32} / 1000) - (($_->{value}->{u32} / 60000) * 60);
+    $reading = sprintf("%d:%02d", $minutes, $seconds);
 
-    readingsBulkUpdate($hash, 'position', sprintf("%d:%02d", $minutes, $seconds));
+    readingsBulkUpdate($hash, 'position', $reading) if ($reading ne ReadingsVal($name, 'position', ''));
   }
   elsif ('netRemote.play.repeat' eq $_->{node})
   {
-    readingsBulkUpdate($hash, 'repeat', (1 == $_->{value}->{u8} ? 'on' : 'off'));
+    $reading = (1 == $_->{value}->{u8} ? 'on' : 'off');
+  
+    readingsBulkUpdate($hash, 'repeat', $reading) if ($reading ne ReadingsVal($name, 'repeat', ''));
   }
   elsif ('netRemote.play.shuffle' eq $_->{node})
   {
-    readingsBulkUpdate($hash, 'shuffle', (1 == $_->{value}->{u8} ? 'on' : 'off'));
+    $reading = (1 == $_->{value}->{u8} ? 'on' : 'off');
+  
+    readingsBulkUpdate($hash, 'shuffle', $reading) if ($reading ne ReadingsVal($name, 'shuffle', ''));
   }
   elsif ('netRemote.sys.caps.volumeSteps' eq $_->{node})
   {
@@ -496,7 +524,9 @@ sub SIRD_SetReadings($)
   }
   elsif ('netRemote.sys.audio.mute' eq $_->{node})
   {
-    readingsBulkUpdate($hash, 'mute', (1 == $_->{value}->{u8} ? 'on' : 'off'));
+    $reading = (1 == $_->{value}->{u8} ? 'on' : 'off');
+    
+    readingsBulkUpdate($hash, 'mute', $reading) if ($reading ne ReadingsVal($name, 'mute', ''));
   }
   elsif (('netRemote.nav.state' eq $_->{node}) && (0 == $_->{value}->{u8}))
   {
@@ -978,7 +1008,7 @@ sub SIRD_ParseInputs($$$)
 
         if ($inputReading =~ /$param->{value}:(.*?)(?:,|$)/)
         {
-          readingsSingleUpdate($hash, 'input', $1, 1);
+          readingsSingleUpdate($hash, 'input', $1, 1) if ($1 ne ReadingsVal($name, 'input', ''));
         }
       }
       else
