@@ -13,10 +13,9 @@ use warnings;
 use utf8;
 use Encode qw(encode_utf8 decode_utf8);
 use XML::Simple qw(:strict);
-use Data::Dumper;
+#use Data::Dumper;
 
 use HttpUtils;
-
 
 
 sub SIRD_Initialize($)
@@ -31,6 +30,7 @@ sub SIRD_Initialize($)
   $hash->{AttrFn}   = 'SIRD_Attr';
   $hash->{AttrList} = 'disable:0,1 '.
                       'autoLogin:0,1 '.
+                      'compatibilityMode:0,1 '.
                       'playCommands '.
                       $readingFnAttributes;
 
@@ -308,52 +308,93 @@ sub SIRD_Update($)
   SIRD_SetNextTimer($hash, undef);
 
   SIRD_SendRequest($hash, 'GET', 'netRemote.sys.power', 0, \&SIRD_ParsePower);
-  if (!defined(ReadingsVal($name, '.inputs', undef)))
+  
+  if (1 == AttrVal($name, 'compatibilityMode', 1))
+  {
+    SIRD_SendRequest($hash, 'GET', 'netRemote.nav.state', 0, \&SIRD_ParseGeneral);
+    SIRD_SendRequest($hash, 'GET', 'netRemote.nav.status', 0, \&SIRD_ParseGeneral);
+    SIRD_SendRequest($hash, 'GET', 'netRemote.nav.caps', 0, \&SIRD_ParseGeneral);
+    SIRD_SendRequest($hash, 'GET', 'netRemote.nav.numItems', 0, \&SIRD_ParseGeneral);
+    SIRD_SendRequest($hash, 'GET', 'netRemote.nav.depth', 0, \&SIRD_ParseGeneral);
+    SIRD_SendRequest($hash, 'GET', 'netRemote.sys.info.version', 0, \&SIRD_ParseGeneral);
+    SIRD_SendRequest($hash, 'GET', 'netRemote.sys.info.friendlyName', 0, \&SIRD_ParseGeneral);
+  }
+  else
+  {
+    SIRD_SendRequest($hash, 'GET_MULTIPLE', 'node=netRemote.nav.state&'.
+                                            'node=netRemote.nav.status&'.
+                                            'node=netRemote.nav.caps&'.
+                                            'node=netRemote.nav.numItems&'.
+                                            'node=netRemote.nav.depth&'.
+                                            'node=netRemote.sys.info.version&'.
+                                            'node=netRemote.sys.info.friendlyName&', 0, \&SIRD_ParseMultiple);
+  }
+  
+  if (!defined(ReadingsVal($name, '.inputs', undef)) || ('' eq ReadingsVal($name, '.inputs', '')))
   {
     SIRD_SendRequest($hash, 'LIST_GET_NEXT', 'netRemote.sys.caps.validModes/-1', 65536, \&SIRD_ParseInputs);
   }
-  #SIRD_SendRequest($hash, 'GET_NOTIFIES', '', 0, \&SIRD_ParseNotifies);
-  SIRD_SendRequest($hash, 'GET_MULTIPLE', 'node=netRemote.nav.state&'.
-                                          'node=netRemote.nav.status&'.
-                                          'node=netRemote.nav.caps&'.
-                                          'node=netRemote.nav.numItems&'.
-                                          'node=netRemote.nav.depth&'.
-                                          'node=netRemote.sys.info.version&'.
-                                          'node=netRemote.sys.info.friendlyName&', 0, \&SIRD_ParseMultiple);
   SIRD_SendRequest($hash, 'LIST_GET_NEXT', 'netRemote.nav.presets/-1', 20, \&SIRD_ParsePresets);
+  
+  #SIRD_SendRequest($hash, 'GET_NOTIFIES', '', 0, \&SIRD_ParseNotifies);
 
   if ('on' eq ReadingsVal($name, 'power', 'unknown'))
   {
-    SIRD_SendRequest($hash, 'GET_MULTIPLE', 'node=netRemote.play.info.name&'.
-                                            'node=netRemote.play.info.description&'.
-                                            'node=netRemote.play.info.albumDescription&'.
-                                            'node=netRemote.play.info.artistDescription&'.
-                                            'node=netRemote.play.info.duration&'.
-                                            'node=netRemote.play.info.artist&'.
-                                            'node=netRemote.play.info.album&'.
-                                            'node=netRemote.play.info.graphicUri&'.
-                                            'node=netRemote.play.info.text&', 0, \&SIRD_ParseMultiple);
+    if (1 == AttrVal($name, 'compatibilityMode', 1))
+    {
+      SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.name', 0, \&SIRD_ParseGeneral);
+      SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.description', 0, \&SIRD_ParseGeneral);
+      SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.albumDescription', 0, \&SIRD_ParseGeneral);
+      SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.artistDescription', 0, \&SIRD_ParseGeneral);
+      SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.duration', 0, \&SIRD_ParseGeneral);
+      SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.artist', 0, \&SIRD_ParseGeneral);
+      SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.album', 0, \&SIRD_ParseGeneral);
+      SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.graphicUri', 0, \&SIRD_ParseGeneral);
+      SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.text', 0, \&SIRD_ParseGeneral);
+      SIRD_SendRequest($hash, 'GET', 'netRemote.sys.mode', 0, \&SIRD_ParseGeneral);
+      SIRD_SendRequest($hash, 'GET', 'netRemote.play.status', 0, \&SIRD_ParseGeneral);
+      SIRD_SendRequest($hash, 'GET', 'netRemote.play.caps', 0, \&SIRD_ParseGeneral);
+      SIRD_SendRequest($hash, 'GET', 'netRemote.play.errorStr', 0, \&SIRD_ParseGeneral);
+      SIRD_SendRequest($hash, 'GET', 'netRemote.play.position', 0, \&SIRD_ParseGeneral);
+      SIRD_SendRequest($hash, 'GET', 'netRemote.play.repeat', 0, \&SIRD_ParseGeneral);
+      SIRD_SendRequest($hash, 'GET', 'netRemote.play.shuffle', 0, \&SIRD_ParseGeneral);
+      SIRD_SendRequest($hash, 'GET', 'netRemote.sys.caps.volumeSteps', 0, \&SIRD_ParseGeneral);
+      SIRD_SendRequest($hash, 'GET', 'netRemote.sys.audio.volume', 0, \&SIRD_ParseGeneral);
+      SIRD_SendRequest($hash, 'GET', 'netRemote.sys.audio.mute', 0, \&SIRD_ParseGeneral);       
+    }
+    else
+    {
+      SIRD_SendRequest($hash, 'GET_MULTIPLE', 'node=netRemote.play.info.name&'.
+                                              'node=netRemote.play.info.description&'.
+                                              'node=netRemote.play.info.albumDescription&'.
+                                              'node=netRemote.play.info.artistDescription&'.
+                                              'node=netRemote.play.info.duration&'.
+                                              'node=netRemote.play.info.artist&'.
+                                              'node=netRemote.play.info.album&'.
+                                              'node=netRemote.play.info.graphicUri&'.
+                                              'node=netRemote.play.info.text&', 0, \&SIRD_ParseMultiple);
 
-    SIRD_SendRequest($hash, 'GET_MULTIPLE', 'node=netRemote.sys.mode&'.
-                                            'node=netRemote.play.status&'.
-                                            'node=netRemote.play.caps&'.
-                                            'node=netRemote.play.errorStr&'.
-                                            'node=netRemote.play.position&'.
-                                            'node=netRemote.play.repeat&'.
-                                            'node=netRemote.play.shuffle&'.
-                                            'node=netRemote.sys.caps.volumeSteps&'.
-                                            'node=netRemote.sys.audio.volume&'.
-                                            'node=netRemote.sys.audio.mute&', 0, \&SIRD_ParseMultiple);
+      SIRD_SendRequest($hash, 'GET_MULTIPLE', 'node=netRemote.sys.mode&'.
+                                              'node=netRemote.play.status&'.
+                                              'node=netRemote.play.caps&'.
+                                              'node=netRemote.play.errorStr&'.
+                                              'node=netRemote.play.position&'.
+                                              'node=netRemote.play.repeat&'.
+                                              'node=netRemote.play.shuffle&'.
+                                              'node=netRemote.sys.caps.volumeSteps&'.
+                                              'node=netRemote.sys.audio.volume&'.
+                                              'node=netRemote.sys.audio.mute&', 0, \&SIRD_ParseMultiple);
 
-    #SIRD_SendRequest($hash, 'GET_MULTIPLE', 'node=netRemote.multiroom.group.name&'.
-    #                                        'node=netRemote.multiroom.group.id&'.
-    #                                        'node=netRemote.multiroom.group.state&'.
-    #                                        'node=netRemote.multiroom.device.serverStatus&'.
-    #                                        'node=netRemote.multiroom.caps.maxClients&', 0, \&SIRD_ParseMultiple);
+      #SIRD_SendRequest($hash, 'GET_MULTIPLE', 'node=netRemote.multiroom.group.name&'.
+      #                                        'node=netRemote.multiroom.group.id&'.
+      #                                        'node=netRemote.multiroom.group.state&'.
+      #                                        'node=netRemote.multiroom.device.serverStatus&'.
+      #                                        'node=netRemote.multiroom.caps.maxClients&', 0, \&SIRD_ParseMultiple);
 
-    #SIRD_SendRequest($hash, 'GET_MULTIPLE', 'node=netRemote.multichannel.system.name&'.
-    #                                        'node=netRemote.multichannel.system.id&'.
-    #                                        'node=netRemote.multichannel.system.state&', 0, \&SIRD_ParseMultiple);
+      #SIRD_SendRequest($hash, 'GET_MULTIPLE', 'node=netRemote.multichannel.system.name&'.
+      #                                        'node=netRemote.multichannel.system.id&'.
+      #                                        'node=netRemote.multichannel.system.state&', 0, \&SIRD_ParseMultiple);
+    }
   }
   else
   {
@@ -408,25 +449,25 @@ sub SIRD_SetReadings($)
   if ('netRemote.play.info.name' eq $_->{node})
   {
     $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
-    
+
     readingsBulkUpdate($hash, 'currentTitle', $reading) if ($reading ne ReadingsVal($name, 'currentTitle', ''));
   }
   elsif ('netRemote.play.info.description' eq $_->{node})
   {
     $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
-    
+
     readingsBulkUpdate($hash, 'description', $reading) if ($reading ne ReadingsVal($name, 'description', ''));
   }
   elsif ('netRemote.play.info.albumDescription' eq $_->{node})
   {
     $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
-    
+
     readingsBulkUpdate($hash, 'currentAlbumDescription', $reading) if ($reading ne ReadingsVal($name, 'currentAlbumDescription', ''));
   }
   elsif ('netRemote.play.info.artistDescription' eq $_->{node})
   {
     $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
-    
+
     readingsBulkUpdate($hash, 'currentArtistDescription', $reading) if ($reading ne ReadingsVal($name, 'currentArtistDescription', ''));
   }
   elsif ('netRemote.play.info.duration' eq $_->{node})
@@ -436,37 +477,37 @@ sub SIRD_SetReadings($)
   elsif ('netRemote.play.info.artist' eq $_->{node})
   {
     $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
-    
+
     readingsBulkUpdate($hash, 'currentArtist', $reading) if ($reading ne ReadingsVal($name, 'currentArtist', ''));
   }
   elsif ('netRemote.play.info.album' eq $_->{node})
   {
     $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
-  
+
     readingsBulkUpdate($hash, 'currentAlbum', $reading) if ($reading ne ReadingsVal($name, 'currentAlbum', ''));
   }
   elsif ('netRemote.play.info.graphicUri' eq $_->{node})
   {
     $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
-  
+
     readingsBulkUpdate($hash, 'graphicUri', $reading) if ($reading ne ReadingsVal($name, 'graphicUri', ''));
   }
   elsif ('netRemote.play.info.text' eq $_->{node})
   {
     $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
-  
+
     readingsBulkUpdate($hash, 'infoText', $reading) if ($reading ne ReadingsVal($name, 'infoText', ''));
   }
   elsif ('netRemote.sys.info.version' eq $_->{node})
   {
     $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
-  
+
     readingsBulkUpdate($hash, 'version', $reading) if ($reading ne ReadingsVal($name, 'version', ''));
   }
   elsif ('netRemote.sys.info.friendlyName' eq $_->{node})
   {
     $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
-  
+
     readingsBulkUpdate($hash, 'friendlyName', $reading) if ($reading ne ReadingsVal($name, 'friendlyName', ''));
   }
   elsif ('netRemote.sys.mode' eq $_->{node})
@@ -488,7 +529,7 @@ sub SIRD_SetReadings($)
   elsif ('netRemote.play.errorStr' eq $_->{node})
   {
     $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
-  
+
     readingsBulkUpdate($hash, 'errorStr', $reading) if ($reading ne ReadingsVal($name, 'errorStr', ''));
   }
   elsif ('netRemote.play.position' eq $_->{node})
@@ -502,13 +543,13 @@ sub SIRD_SetReadings($)
   elsif ('netRemote.play.repeat' eq $_->{node})
   {
     $reading = (1 == $_->{value}->{u8} ? 'on' : 'off');
-  
+
     readingsBulkUpdate($hash, 'repeat', $reading) if ($reading ne ReadingsVal($name, 'repeat', ''));
   }
   elsif ('netRemote.play.shuffle' eq $_->{node})
   {
     $reading = (1 == $_->{value}->{u8} ? 'on' : 'off');
-  
+
     readingsBulkUpdate($hash, 'shuffle', $reading) if ($reading ne ReadingsVal($name, 'shuffle', ''));
   }
   elsif ('netRemote.sys.caps.volumeSteps' eq $_->{node})
@@ -525,7 +566,7 @@ sub SIRD_SetReadings($)
   elsif ('netRemote.sys.audio.mute' eq $_->{node})
   {
     $reading = (1 == $_->{value}->{u8} ? 'on' : 'off');
-    
+
     readingsBulkUpdate($hash, 'mute', $reading) if ($reading ne ReadingsVal($name, 'mute', ''));
   }
   elsif (('netRemote.nav.state' eq $_->{node}) && (0 == $_->{value}->{u8}))
@@ -581,6 +622,7 @@ sub SIRD_SendRequest($$$$$)
                   timeout    => 3,
                   hash       => $hash,
                   cmd        => $cmd,
+                  request    => $request,
                   value      => $value,
                   method     => 'GET',
                   callback   => $callback
@@ -669,6 +711,47 @@ sub SIRD_ParseMultiple($$$)
     }
 
     readingsEndUpdate($hash, 1);
+  }
+}
+
+
+sub SIRD_ParseGeneral($$$)
+{
+  my ($param, $err, $data) = @_;
+  my $hash = $param->{hash};
+  my $name = $hash->{NAME};
+  my $xml;
+
+  if ('' ne $err)
+  {
+    Log3 $name, 5, $name.': Error while requesting '.$param->{url}.' - '.$err;
+  }
+  elsif ('' ne $data)
+  {
+    Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
+
+    eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => []);};
+
+    if (!$@ && ('FS_OK' eq $xml->{status}))
+    {
+      Log3 $name, 5, $name.': General '.$param->{cmd}.' successful.';
+
+      if ('GET' eq $param->{cmd})
+      {
+        $xml->{node} = $param->{request};
+        $_ = $xml;
+        
+        #Log3 $name, 3, $name.': '.Dumper($_);
+
+        readingsBeginUpdate($hash);
+        SIRD_SetReadings($hash);
+        readingsEndUpdate($hash, 1);
+      }
+    }
+    else
+    {
+      Log3 $name, 3, $name.': General '.$param->{cmd}.' failed (the interval may be too small).';
+    }
   }
 }
 
@@ -1027,8 +1110,15 @@ sub SIRD_ParseInputs($$$)
         }
 
         $inputs =~ s/\s//g;
-
-        readingsSingleUpdate($hash, '.inputs', $inputs, 1);
+        
+        if ('' ne $inputs)
+        {
+          readingsSingleUpdate($hash, '.inputs', $inputs, 1);
+        }
+        else
+        {
+          Log3 $name, 3, $name.': Something went wrong by parsing the inputs.';
+        }
       }
     }
     else
@@ -1160,6 +1250,7 @@ sub SIRD_ParsePresets($$$)
     <li><b>disable:</b> disable the module (no update anymore)<br></li>
     <li><b>autoLogin:</b> module tries to automatically login into the radio if needed (default: auto login activated)<br></li>
     <li><b>playCommands:</b> can be used to define the mapping of play commands (default: 0:stop,1:play,2:pause,3:next,4:previous)<br></li>
+    <li><b>compatibilityMode:</b> This mode is activated by default and should work for all radios. It is highly recommended to disable the compatibility mode if possible because it needs a lot of ressources.<br></li>
     <br>
   </ul>
 </ul>
