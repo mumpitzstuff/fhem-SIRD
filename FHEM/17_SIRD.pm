@@ -153,12 +153,12 @@ sub SIRD_Attr($$$$) {
 sub SIRD_Set($$@) {
   my ($hash, $name, @aa) = @_;
   my ($cmd, @args) = @aa;
-  my $arg = @args;
+  my $arg = $args[0];
   my $inputs = 'noArg';
   my $presets = 'noArg';
   my $inputReading = ReadingsVal($name, '.inputs', undef);
   my $presetReading = ReadingsVal($name, '.presets', undef);
-  my $volumeSteps = ReadingsNum($name, '.volumeSteps', 20);
+  my $volumeSteps = ReadingsVal($name, '.volumeSteps', 20);
 
   if (defined($inputReading))
   {
@@ -215,9 +215,7 @@ sub SIRD_Set($$@) {
   }
   elsif ('volume' eq $cmd)
   {
-     my $volumeSteps = ReadingsNum($name, '.volumeSteps', 20);
-
-    SIRD_SendRequest($hash, 'SET', 'netRemote.sys.audio.volume', int($arg) / (100 / int($volumeSteps)), \&SIRD_ParseVolume);
+    SIRD_SendRequest($hash, 'SET', 'netRemote.sys.audio.volume', int($arg / (100 / $volumeSteps)), \&SIRD_ParseVolume);
   }
   elsif ('volumeStraight' eq $cmd)
   {
@@ -316,7 +314,7 @@ sub SIRD_Update($)
   SIRD_SetNextTimer($hash, undef);
 
   SIRD_SendRequest($hash, 'GET', 'netRemote.sys.power', 0, \&SIRD_ParsePower);
-  
+
   if (1 == AttrVal($name, 'compatibilityMode', 1))
   {
     SIRD_SendRequest($hash, 'GET', 'netRemote.nav.state', 0, \&SIRD_ParseGeneral);
@@ -337,13 +335,13 @@ sub SIRD_Update($)
                                             'node=netRemote.sys.info.version&'.
                                             'node=netRemote.sys.info.friendlyName&', 0, \&SIRD_ParseMultiple);
   }
-  
+
   if (!defined(ReadingsVal($name, '.inputs', undef)) || ('' eq ReadingsVal($name, '.inputs', '')))
   {
     SIRD_SendRequest($hash, 'LIST_GET_NEXT', 'netRemote.sys.caps.validModes/-1', 65536, \&SIRD_ParseInputs);
   }
   SIRD_SendRequest($hash, 'LIST_GET_NEXT', 'netRemote.nav.presets/-1', 20, \&SIRD_ParsePresets);
-  
+
   #SIRD_SendRequest($hash, 'GET_NOTIFIES', '', 0, \&SIRD_ParseNotifies);
 
   if ('on' eq ReadingsVal($name, 'power', 'unknown'))
@@ -351,7 +349,7 @@ sub SIRD_Update($)
     if (1 == AttrVal($name, 'compatibilityMode', 1))
     {
       InternalTimer(gettimeofday() + 2, 'SIRD_UpdateA', $name, 0);
-      
+
       #SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.name', 0, \&SIRD_ParseGeneral);
       #SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.description', 0, \&SIRD_ParseGeneral);
       #SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.albumDescription', 0, \&SIRD_ParseGeneral);
@@ -370,7 +368,7 @@ sub SIRD_Update($)
       #SIRD_SendRequest($hash, 'GET', 'netRemote.play.shuffle', 0, \&SIRD_ParseGeneral);
       #SIRD_SendRequest($hash, 'GET', 'netRemote.sys.caps.volumeSteps', 0, \&SIRD_ParseGeneral);
       #SIRD_SendRequest($hash, 'GET', 'netRemote.sys.audio.volume', 0, \&SIRD_ParseGeneral);
-      #SIRD_SendRequest($hash, 'GET', 'netRemote.sys.audio.mute', 0, \&SIRD_ParseGeneral);       
+      #SIRD_SendRequest($hash, 'GET', 'netRemote.sys.audio.mute', 0, \&SIRD_ParseGeneral);
     }
     else
     {
@@ -428,7 +426,7 @@ sub SIRD_UpdateA($)
 {
   my ($name) = @_;
   my $hash = $defs{$name};
-  
+
   SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.name', 0, \&SIRD_ParseGeneral);
   SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.description', 0, \&SIRD_ParseGeneral);
   SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.albumDescription', 0, \&SIRD_ParseGeneral);
@@ -439,7 +437,7 @@ sub SIRD_UpdateA($)
   SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.graphicUri', 0, \&SIRD_ParseGeneral);
   SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.text', 0, \&SIRD_ParseGeneral);
   SIRD_SendRequest($hash, 'GET', 'netRemote.sys.mode', 0, \&SIRD_ParseGeneral);
-  
+
   InternalTimer(gettimeofday() + 2, 'SIRD_UpdateB', $name, 0);
 }
 
@@ -448,7 +446,7 @@ sub SIRD_UpdateB($)
 {
   my ($name) = @_;
   my $hash = $defs{$name};
-  
+
   SIRD_SendRequest($hash, 'GET', 'netRemote.play.status', 0, \&SIRD_ParseGeneral);
   SIRD_SendRequest($hash, 'GET', 'netRemote.play.caps', 0, \&SIRD_ParseGeneral);
   SIRD_SendRequest($hash, 'GET', 'netRemote.play.errorStr', 0, \&SIRD_ParseGeneral);
@@ -457,7 +455,7 @@ sub SIRD_UpdateB($)
   SIRD_SendRequest($hash, 'GET', 'netRemote.play.shuffle', 0, \&SIRD_ParseGeneral);
   SIRD_SendRequest($hash, 'GET', 'netRemote.sys.caps.volumeSteps', 0, \&SIRD_ParseGeneral);
   SIRD_SendRequest($hash, 'GET', 'netRemote.sys.audio.volume', 0, \&SIRD_ParseGeneral);
-  SIRD_SendRequest($hash, 'GET', 'netRemote.sys.audio.mute', 0, \&SIRD_ParseGeneral);       
+  SIRD_SendRequest($hash, 'GET', 'netRemote.sys.audio.mute', 0, \&SIRD_ParseGeneral);
 }
 
 
@@ -605,10 +603,10 @@ sub SIRD_SetReadings($)
   }
   elsif ('netRemote.sys.audio.volume' eq $_->{node})
   {
-    my $volumeSteps = ReadingsNum($name, '.volumeSteps', 20);
+    my $volumeSteps = ReadingsVal($name, '.volumeSteps', 20);
 
-    readingsBulkUpdate($hash, 'volume', int($_->{value}->{u8} * (100 / $volumeSteps))) if (ReadingsNum($name, 'volume', -1) ne $_->{value}->{u8} * (100 / $volumeSteps));
-    readingsBulkUpdate($hash, 'volumeStraight', $_->{value}->{u8}) if (ReadingsNum($name, 'volumeStraight', -1) ne $_->{value}->{u8});
+    readingsBulkUpdate($hash, 'volume', int($_->{value}->{u8} * (100 / $volumeSteps))) if (ReadingsVal($name, 'volume', -1) ne int($_->{value}->{u8} * (100 / $volumeSteps)));
+    readingsBulkUpdate($hash, 'volumeStraight', int($_->{value}->{u8})) if (ReadingsVal($name, 'volumeStraight', -1) ne int($_->{value}->{u8}));
   }
   elsif ('netRemote.sys.audio.mute' eq $_->{node})
   {
@@ -787,7 +785,7 @@ sub SIRD_ParseGeneral($$$)
       {
         $xml->{node} = $param->{request};
         $_ = $xml;
-        
+
         readingsBeginUpdate($hash);
         SIRD_SetReadings($hash);
         readingsEndUpdate($hash, 1);
@@ -947,16 +945,18 @@ sub SIRD_ParseVolume($$$)
 
     if (!$@ && ('FS_OK' eq $xml->{status}))
     {
+      my $volumeSteps = ReadingsVal($name, '.volumeSteps', 20);
+
       Log3 $name, 5, $name.': Volume '.$param->{cmd}.' successful.';
 
       if ('GET' eq $param->{cmd})
       {
-        readingsSingleUpdate($hash, 'volume', int($xml->{value}->{u8} * 5), 1);
-        readingsSingleUpdate($hash, 'volumeStraight', int($xml->{value}->{u8}), 1);
+        readingsSingleUpdate($hash, 'volume', int($xml->{value}->{u8} * (100 / $volumeSteps)), 1) if (ReadingsVal($name, 'volume', -1) ne int($xml->{value}->{u8} * (100 / $volumeSteps)));
+        readingsSingleUpdate($hash, 'volumeStraight', int($xml->{value}->{u8}), 1) if (ReadingsVal($name, 'volumeStraight', -1) ne int($xml->{value}->{u8}));
       }
       elsif ('SET' eq $param->{cmd})
       {
-        readingsSingleUpdate($hash, 'volume', int($param->{value} * 5), 1);
+        readingsSingleUpdate($hash, 'volume', int($param->{value} * (100 / $volumeSteps)), 1);
         readingsSingleUpdate($hash, 'volumeStraight', int($param->{value}), 1);
       }
     }
@@ -1150,7 +1150,7 @@ sub SIRD_ParseInputs($$$)
           if (exists($item->{key}) && exists($item->{field}) && (scalar(@{$item->{field}}) >= 1))
           {
             foreach my $field (@{$item->{field}})
-            {            
+            {
               if (exists($field->{name}) && ('label' eq $field->{name}) && !ref($field->{c8_array}))
               {
                 $inputs .= ',' if ('' ne $inputs);
@@ -1161,7 +1161,7 @@ sub SIRD_ParseInputs($$$)
         }
 
         $inputs =~ s/\s//g;
-        
+
         if ('' ne $inputs)
         {
           readingsSingleUpdate($hash, '.inputs', $inputs, 1);
