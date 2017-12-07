@@ -16,6 +16,7 @@ use XML::Simple qw(:strict);
 #use Data::Dumper;
 
 use HttpUtils;
+use SetExtensions;
 
 
 sub SIRD_Initialize($)
@@ -151,7 +152,8 @@ sub SIRD_Attr($$$$) {
 
 sub SIRD_Set($$@) {
   my ($hash, $name, @aa) = @_;
-  my ($cmd, $arg) = @aa;
+  my ($cmd, @args) = @aa;
+  my $arg = @args;
   my $inputs = 'noArg';
   my $presets = 'noArg';
   my $inputReading = ReadingsVal($name, '.inputs', undef);
@@ -199,14 +201,14 @@ sub SIRD_Set($$@) {
   }
   elsif ('input' eq $cmd)
   {
-    if ($inputReading =~ /(\d+):$arg/)
+    if (defined($arg) && ($inputReading =~ /(\d+):$arg/))
     {
       SIRD_SendRequest($hash, 'SET', 'netRemote.sys.mode', $1, \&SIRD_ParseInputs);
     }
   }
   elsif ('preset' eq $cmd)
   {
-    if ($presetReading =~ /(\d+):$arg/)
+    if (defined($arg) && ($presetReading =~ /(\d+):$arg/))
     {
       SIRD_SendRequest($hash, 'SET', 'netRemote.nav.action.selectPreset', $1, \&SIRD_ParsePresets);
     }
@@ -241,9 +243,15 @@ sub SIRD_Set($$@) {
   {
     # do nothing here (readings already refreshed at the end)
   }
+  # SetExtensions Commands
+  elsif ($cmd =~ /^(?:on\-for\-timer|off\-for\-timer|on\-till|off\-till|on\-till\-overnight|off\till\-overnight|intervals|toggle)$/)
+  {
+    return SetExtensions($hash, 'on off', $name, $cmd, @args);
+  }
   else
   {
     my $list = 'login:noArg on:noArg off:noArg mute:on,off,toggle shuffle:on,off repeat:on,off stop:noArg play:noArg pause:noArg next:noArg previous:noArg '.
+               'on-for-timer off-for-timer on-till off-till on-till-overnight off-till-overnight intervals toggle:noArg '.
                'volume:slider,0,1,100 volumeStraight:slider,0,1,'.$volumeSteps.' statusRequest:noArg input:'.$inputs.' preset:'.$presets;
 
     return 'Unknown argument '.$cmd.', choose one of '.$list;
@@ -342,25 +350,27 @@ sub SIRD_Update($)
   {
     if (1 == AttrVal($name, 'compatibilityMode', 1))
     {
-      SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.name', 0, \&SIRD_ParseGeneral);
-      SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.description', 0, \&SIRD_ParseGeneral);
-      SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.albumDescription', 0, \&SIRD_ParseGeneral);
-      SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.artistDescription', 0, \&SIRD_ParseGeneral);
-      SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.duration', 0, \&SIRD_ParseGeneral);
-      SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.artist', 0, \&SIRD_ParseGeneral);
-      SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.album', 0, \&SIRD_ParseGeneral);
-      SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.graphicUri', 0, \&SIRD_ParseGeneral);
-      SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.text', 0, \&SIRD_ParseGeneral);
-      SIRD_SendRequest($hash, 'GET', 'netRemote.sys.mode', 0, \&SIRD_ParseGeneral);
-      SIRD_SendRequest($hash, 'GET', 'netRemote.play.status', 0, \&SIRD_ParseGeneral);
-      SIRD_SendRequest($hash, 'GET', 'netRemote.play.caps', 0, \&SIRD_ParseGeneral);
-      SIRD_SendRequest($hash, 'GET', 'netRemote.play.errorStr', 0, \&SIRD_ParseGeneral);
-      SIRD_SendRequest($hash, 'GET', 'netRemote.play.position', 0, \&SIRD_ParseGeneral);
-      SIRD_SendRequest($hash, 'GET', 'netRemote.play.repeat', 0, \&SIRD_ParseGeneral);
-      SIRD_SendRequest($hash, 'GET', 'netRemote.play.shuffle', 0, \&SIRD_ParseGeneral);
-      SIRD_SendRequest($hash, 'GET', 'netRemote.sys.caps.volumeSteps', 0, \&SIRD_ParseGeneral);
-      SIRD_SendRequest($hash, 'GET', 'netRemote.sys.audio.volume', 0, \&SIRD_ParseGeneral);
-      SIRD_SendRequest($hash, 'GET', 'netRemote.sys.audio.mute', 0, \&SIRD_ParseGeneral);       
+      InternalTimer(gettimeofday() + 2, 'SIRD_UpdateA', $name, 0);
+      
+      #SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.name', 0, \&SIRD_ParseGeneral);
+      #SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.description', 0, \&SIRD_ParseGeneral);
+      #SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.albumDescription', 0, \&SIRD_ParseGeneral);
+      #SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.artistDescription', 0, \&SIRD_ParseGeneral);
+      #SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.duration', 0, \&SIRD_ParseGeneral);
+      #SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.artist', 0, \&SIRD_ParseGeneral);
+      #SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.album', 0, \&SIRD_ParseGeneral);
+      #SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.graphicUri', 0, \&SIRD_ParseGeneral);
+      #SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.text', 0, \&SIRD_ParseGeneral);
+      #SIRD_SendRequest($hash, 'GET', 'netRemote.sys.mode', 0, \&SIRD_ParseGeneral);
+      #SIRD_SendRequest($hash, 'GET', 'netRemote.play.status', 0, \&SIRD_ParseGeneral);
+      #SIRD_SendRequest($hash, 'GET', 'netRemote.play.caps', 0, \&SIRD_ParseGeneral);
+      #SIRD_SendRequest($hash, 'GET', 'netRemote.play.errorStr', 0, \&SIRD_ParseGeneral);
+      #SIRD_SendRequest($hash, 'GET', 'netRemote.play.position', 0, \&SIRD_ParseGeneral);
+      #SIRD_SendRequest($hash, 'GET', 'netRemote.play.repeat', 0, \&SIRD_ParseGeneral);
+      #SIRD_SendRequest($hash, 'GET', 'netRemote.play.shuffle', 0, \&SIRD_ParseGeneral);
+      #SIRD_SendRequest($hash, 'GET', 'netRemote.sys.caps.volumeSteps', 0, \&SIRD_ParseGeneral);
+      #SIRD_SendRequest($hash, 'GET', 'netRemote.sys.audio.volume', 0, \&SIRD_ParseGeneral);
+      #SIRD_SendRequest($hash, 'GET', 'netRemote.sys.audio.mute', 0, \&SIRD_ParseGeneral);       
     }
     else
     {
@@ -411,6 +421,43 @@ sub SIRD_Update($)
   {
     readingsSingleUpdate($hash, 'state', ReadingsVal($name, 'power', ''), 1);
   }
+}
+
+
+sub SIRD_UpdateA($)
+{
+  my ($name) = @_;
+  my $hash = $defs{$name};
+  
+  SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.name', 0, \&SIRD_ParseGeneral);
+  SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.description', 0, \&SIRD_ParseGeneral);
+  SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.albumDescription', 0, \&SIRD_ParseGeneral);
+  SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.artistDescription', 0, \&SIRD_ParseGeneral);
+  SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.duration', 0, \&SIRD_ParseGeneral);
+  SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.artist', 0, \&SIRD_ParseGeneral);
+  SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.album', 0, \&SIRD_ParseGeneral);
+  SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.graphicUri', 0, \&SIRD_ParseGeneral);
+  SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.text', 0, \&SIRD_ParseGeneral);
+  SIRD_SendRequest($hash, 'GET', 'netRemote.sys.mode', 0, \&SIRD_ParseGeneral);
+  
+  InternalTimer(gettimeofday() + 2, 'SIRD_UpdateB', $name, 0);
+}
+
+
+sub SIRD_UpdateB($)
+{
+  my ($name) = @_;
+  my $hash = $defs{$name};
+  
+  SIRD_SendRequest($hash, 'GET', 'netRemote.play.status', 0, \&SIRD_ParseGeneral);
+  SIRD_SendRequest($hash, 'GET', 'netRemote.play.caps', 0, \&SIRD_ParseGeneral);
+  SIRD_SendRequest($hash, 'GET', 'netRemote.play.errorStr', 0, \&SIRD_ParseGeneral);
+  SIRD_SendRequest($hash, 'GET', 'netRemote.play.position', 0, \&SIRD_ParseGeneral);
+  SIRD_SendRequest($hash, 'GET', 'netRemote.play.repeat', 0, \&SIRD_ParseGeneral);
+  SIRD_SendRequest($hash, 'GET', 'netRemote.play.shuffle', 0, \&SIRD_ParseGeneral);
+  SIRD_SendRequest($hash, 'GET', 'netRemote.sys.caps.volumeSteps', 0, \&SIRD_ParseGeneral);
+  SIRD_SendRequest($hash, 'GET', 'netRemote.sys.audio.volume', 0, \&SIRD_ParseGeneral);
+  SIRD_SendRequest($hash, 'GET', 'netRemote.sys.audio.mute', 0, \&SIRD_ParseGeneral);       
 }
 
 
@@ -619,7 +666,7 @@ sub SIRD_SendRequest($$$$$)
 
     my $param = {
                   url        => 'http://'.$ip.':80/fsapi/'.$_,
-                  timeout    => 3,
+                  timeout    => 6,
                   hash       => $hash,
                   cmd        => $cmd,
                   request    => $request,
@@ -741,16 +788,14 @@ sub SIRD_ParseGeneral($$$)
         $xml->{node} = $param->{request};
         $_ = $xml;
         
-        #Log3 $name, 3, $name.': '.Dumper($_);
-
         readingsBeginUpdate($hash);
         SIRD_SetReadings($hash);
         readingsEndUpdate($hash, 1);
       }
     }
-    else
+    elsif ($xml->{status} !~ /FS_NODE/)
     {
-      Log3 $name, 3, $name.': General '.$param->{cmd}.' failed (the interval may be too small).';
+      Log3 $name, 5, $name.': General '.$param->{request}.' failed.';
     }
   }
 }
@@ -1102,10 +1147,16 @@ sub SIRD_ParseInputs($$$)
 
         foreach my $item (@{$xml->{item}})
         {
-          if (exists($item->{key}) && exists($item->{field}) && (5 == scalar(@{$item->{field}})) && !ref(@{$item->{field}}[2]->{c8_array}))
+          if (exists($item->{key}) && exists($item->{field}) && (scalar(@{$item->{field}}) >= 1))
           {
-            $inputs .= ',' if ('' ne $inputs);
-            $inputs .= $item->{key}.':'.lc(@{$item->{field}}[2]->{c8_array});
+            foreach my $field (@{$item->{field}})
+            {            
+              if (exists($field->{name}) && ('label' eq $field->{name}) && !ref($field->{c8_array}))
+              {
+                $inputs .= ',' if ('' ne $inputs);
+                $inputs .= $item->{key}.':'.lc($field->{c8_array});
+              }
+            }
           }
         }
 

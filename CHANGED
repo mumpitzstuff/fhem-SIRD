@@ -1,1 +1,3 @@
- - compatibility mode added for old radios (needs a lot of ressources!)
+ - timeouts fixed (dirty hack - rework needed)
+ - inputs fixed
+ - SetExtensions added
