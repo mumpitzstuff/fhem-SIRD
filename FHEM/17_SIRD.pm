@@ -13,10 +13,15 @@ use warnings;
 use utf8;
 use Encode qw(encode_utf8 decode_utf8);
 use XML::Simple qw(:strict);
+use URI::Escape;
 #use Data::Dumper;
 
 use HttpUtils;
+use Blocking;
 use SetExtensions;
+
+# global variables
+my @SIRD_queue;
 
 
 sub SIRD_Initialize($)
@@ -33,6 +38,7 @@ sub SIRD_Initialize($)
                       'autoLogin:0,1 '.
                       'compatibilityMode:0,1 '.
                       'playCommands '.
+                      'maxNavigationItems '.
                       $readingFnAttributes;
 
   return undef;
@@ -55,6 +61,7 @@ sub SIRD_Define($$)
   $hash->{IP} = $ip;
   $hash->{PIN} = $pin;
   $hash->{INTERVAL} = $interval;
+  $hash->{VERSION} = '1.0.1';
 
   readingsSingleUpdate($hash, 'state', 'Initialized', 1);
 
@@ -69,7 +76,9 @@ sub SIRD_Undefine($$)
   my ($hash, $arg) = @_;
 
   RemoveInternalTimer($hash);
+  SetExtensionsCancel($hash);
   HttpUtils_Close($hash);
+  SIRD_AbortNavigation($hash);
 
   return undef;
 }
@@ -80,6 +89,7 @@ sub SIRD_Notify($$)
   my ($hash, $dev) = @_;
   my $name = $hash->{NAME};
 
+  return if ('global' ne $dev->{NAME});
   return if (!grep(m/^INITIALIZED|REREADCFG$/, @{$dev->{CHANGED}}));
 
   if (IsDisabled($name))
@@ -144,6 +154,13 @@ sub SIRD_Attr($$$$) {
         return 'playCommands is required in format: <0-9>:stop,<0-9>:play,<0-9>:pause,<0-9>:next,<0-9>:previous';
       }
     }
+    elsif ('maxNavigationItems' eq $attribute)
+    {
+      if (($value !~ /^\d+$/) && ($value < 1))
+      {
+        return 'maxNavigationItems must be a number greater than 0';
+      }
+    }
   }
 
   return undef;
@@ -164,7 +181,7 @@ sub SIRD_Set($$@) {
   {
     $inputs = '';
 
-    while ($inputReading =~ /\d+:(.*?)(?:,|$)/g)
+    while ($inputReading =~ /\d+:([^,]+),?/g)
     {
       $inputs .= ',' if ('' ne $inputs);
       $inputs .= $1;
@@ -175,7 +192,7 @@ sub SIRD_Set($$@) {
   {
     $presets = '';
 
-    while ($presetReading =~ /\d+:(.*?)(?:,|$)/g)
+    while ($presetReading =~ /\d+:([^,]+),?/g)
     {
       $presets .= ',' if ('' ne $presets);
       $presets .= $1;
@@ -263,7 +280,7 @@ sub SIRD_Set($$@) {
 
 sub SIRD_Get($$@) {
   my ($hash, $name, @aa) = @_;
-  my ($cmd, $arg) = @aa;
+  my ($cmd, @args) = @aa;
 
   if ('inputs' eq $cmd)
   {
@@ -273,14 +290,83 @@ sub SIRD_Get($$@) {
   {
     SIRD_SendRequest($hash, 'LIST_GET_NEXT', 'netRemote.nav.presets/-1', 20, \&SIRD_ParsePresets);
   }
+  elsif ('ls' eq $cmd)
+  {
+    my $ret;
+    my ($index, $type) = @args;
+
+    #Log3 $name, 3, $name.': index '.$index if (defined($index));
+    #Log3 $name, 3, $name.': type '.$type if (defined($type));
+
+    if (!defined($index) || !defined($type))
+    {
+      SIRD_StartNavigation($hash, -1, 0, $hash->{CL});
+      return undef;
+    }
+    else
+    {
+      $type = 0 if ('dir' eq $type);
+      $type = 1 if ('entry' eq $type);
+      $type = 2 if ('back' eq $type);
+      $type = 3 if ('next' eq $type);
+
+      # back?
+      if (2 == $type)
+      {
+        SIRD_SendRequest($hash, 'SET', 'netRemote.nav.action.navigate', -1, \&SIRD_ParseNavigation, $hash->{CL});
+      }
+      # next?
+      elsif (3 == $type)
+      {
+        SIRD_StartNavigation($hash, $index, 0, $hash->{CL});
+      }
+      # folder?
+      elsif (0 == $type)
+      {
+        SIRD_SendRequest($hash, 'SET', 'netRemote.nav.action.navigate', $index, \&SIRD_ParseNavigation, $hash->{CL});
+      }
+      # entry?
+      elsif (1 == $type)
+      {
+        SIRD_SendRequest($hash, 'SET', 'netRemote.nav.action.selectItem', $index, \&SIRD_ParseNavigation, $hash->{CL});
+      }
+
+      return undef;
+    }
+  }
   else
   {
-    my $list = 'inputs:noArg presets:noArg';
+    my $list = 'inputs:noArg presets:noArg ls';
 
     return 'Unknown argument '.$cmd.', choose one of '.$list;
   }
 
   return undef;
+}
+
+
+sub SIRD_CreateLink($$$$$)
+{
+  my ($type, $name, $itemname, $itemindex, $itemtype) = @_;
+
+  if ($type eq 'FHEMWEB')
+  {
+    my $xcmd = 'cmd='.uri_escape('get '.$name.' ls '.$itemindex.' '.$itemtype);
+
+    # single escaped ' if directly returned and double escaped ' if asynchOutput is used
+    $xcmd = "FW_cmd(\\'$FW_ME$FW_subdir?XHR=1&$xcmd\\');\$(\\'#FW_okDialog\\').remove();";
+
+    return '<a onClick="'.$xcmd.'" style="display:flex;align-items:center;cursor:pointer;">'.$itemname.'</a>';
+  }
+  else
+  {
+    $itemtype = 'dir' if (0 == $itemtype);
+    $itemtype = 'entry' if (1 == $itemtype);
+    $itemtype = 'back' if (2 == $itemtype);
+    $itemtype = 'next' if (3 == $itemtype);
+
+    return sprintf("%-6s %-6s %s\n", $itemindex, $itemtype, $itemname);
+  }
 }
 
 
@@ -304,6 +390,239 @@ sub SIRD_SetNextTimer($$)
 }
 
 
+sub SIRD_DeQueue($)
+{
+  my ($name) = @_;
+  my $hash = $defs{$name};
+  my $numEntries = (scalar(@SIRD_queue) < 5 ? scalar(@SIRD_queue) : 5);
+
+  Log3 $name, 3, $name.': Queue full. Update interval MUST be increased!' if (scalar(@SIRD_queue) > 100);
+
+  RemoveInternalTimer($name);
+  InternalTimer(gettimeofday() + 1, 'SIRD_DeQueue', $name, 0) if (scalar(@SIRD_queue) > 0);
+
+  # send max 5 requests each second
+  for (my $i = 0; $i < $numEntries; $i++)
+  {
+    @_ = @{pop(@SIRD_queue)};
+
+    SIRD_SendRequest($hash, $_[0], $_[1], $_[2], $_[3]);
+  }
+}
+
+
+sub SIRD_StartNavigation($$$;$)
+{
+  my ($hash, $index, $wait, $cl) = @_;
+  my $name = $hash->{NAME};
+  my $maxNavigationItems = AttrVal($name, 'maxNavigationItems', 100);
+  my $ip = InternalVal($name, 'IP', undef);
+  my $pin = InternalVal($name, 'PIN', '1234');
+
+  if (exists($hash->{helper}{RUNNING_PID}))
+  {
+    Log3 $name, 3, $name.': Blocking call already running';
+
+    SIRD_AbortNavigation($hash);
+  }
+
+  $hash->{helper}{CL} = (defined($cl) ? $cl : $hash->{CL});
+
+  $hash->{helper}{RUNNING_PID} = BlockingCall('SIRD_DoNavigation', $name.'|'.$ip.'|'.$pin.'|'.$index.'|'.$wait.'|'.$maxNavigationItems, 'SIRD_EndNavigation', 60, 'SIRD_AbortNavigation', $hash);
+}
+
+
+sub SIRD_DoNavigation(@)
+{
+  my ($string) = @_;
+  my ($name, $ip, $pin, $index, $wait, $maxNavigationItems) = split("\\|", $string);
+  my $data = '';
+  my $nav = '<<BACK';
+  my $numNav = $index;
+  my $lastNumNav = $index;
+  my $xml;
+  my $retry;
+  my $retryCounter = 0;
+
+  Log3 $name, 5, $name.': Blocking call running to read navigation items.';
+
+  do
+  {
+    $retry = 0;
+
+    if (0 != $wait)
+    {
+      sleep($wait);
+    }
+
+    $data = GetFileFromURL('http://'.$ip.':80/fsapi/GET/netRemote.nav.numItems?pin='.$pin, 5, '', 1, 5);
+    if ($data && ($data =~ /fsapiResponse/))
+    {
+      eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => []);};
+
+      if (!$@ && ('FS_OK' eq $xml->{status}))
+      {
+        $numNav = ($xml->{value}->{s32} >= 1 ? $xml->{value}->{s32} - 1 : 1);
+      }
+      else
+      {
+        $retry = 1;
+      }
+    }
+    else
+    {
+      $retry = 1;
+    }
+
+    if (0 == $retry)
+    {
+      #Log3 $name, 3, $name.': numNav = '.$numNav.' lastNumNav = '.$lastNumNav.' index = '.$index;
+
+      while (($lastNumNav < ($index + $maxNavigationItems)) && ($lastNumNav < $numNav))
+      {
+        $data = GetFileFromURL('http://'.$ip.':80/fsapi/LIST_GET_NEXT/netRemote.nav.list/'.$lastNumNav.'?pin='.$pin.'&maxItems=50', 10, '', 1, 5);
+        if ($data && ($data =~ /fsapiResponse/))
+        {
+          Log3 $name, 5, $name.': data = '.$data;
+
+          eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => ['item', 'field']);};
+
+          if (!$@ && ('FS_OK' eq $xml->{status}))
+          {
+            my $result = '';
+
+            #Log3 $name, 3, $name.': '.$lastNumNav.' from '.$numNav;
+
+            foreach my $item (@{$xml->{item}})
+            {
+              if (exists($item->{key}) && exists($item->{field}) && (scalar(@{$item->{field}}) >= 1))
+              {
+                my $type = undef;
+                my $name = undef;
+
+                foreach my $field (@{$item->{field}})
+                {
+                  if (exists($field->{name}) && ('name' eq $field->{name}) && !ref($field->{c8_array}))
+                  {
+                    $_ = $field->{c8_array};
+                    $_ =~ s/[^0-9a-zA-Z\.\-\_]+//g;
+
+                    $name = $item->{key}.':'.$_;
+
+                    $lastNumNav = $item->{key};
+                  }
+
+                  if (exists($field->{name}) && ('type' eq $field->{name}))
+                  {
+                    $type = $field->{u8};
+                  }
+                }
+
+                if (defined($name) && defined($type))
+                {
+                  $result .= ',' if ('' ne $result);
+                  $result .= $name.':'.$type;
+                }
+              }
+            }
+
+            if ('' ne $result)
+            {
+              Log3 $name, 5, $name.': result = '.$result;
+              $nav .= $result;
+            }
+          }
+          else
+          {
+            $lastNumNav = $numNav;
+            $retry = 1;
+          }
+        }
+        else
+        {
+          $lastNumNav = $numNav;
+          $retry = 1;
+        }
+      }
+    }
+
+    $retryCounter++;
+  } while ((1 == $retry) && ($retryCounter < 3));
+
+  if ($lastNumNav < $numNav)
+  {
+    $nav .= 'NEXT>>';
+  }
+
+  return $name.'|'.$nav;
+}
+
+
+sub SIRD_EndNavigation($)
+{
+  my ($string) = @_;
+  my ($name, $nav) = split("\\|", $string);
+  my $hash = $defs{$name};
+  my $ret;
+  my $lastIndex = -1;
+
+  if (defined($hash->{helper}{CL}) && $hash->{helper}{CL}{canAsyncOutput})
+  {
+    if ('FHEMWEB' eq $hash->{helper}{CL}{TYPE})
+    {
+      $ret = '<html><div class="container">';
+      $ret .= '<h3 style="text-align: center;">Navigation</h3><hr>';
+      $ret .= '<div class="list-group">';
+    }
+    else
+    {
+      $ret = "Navigation\n";
+      $ret .= sprintf("%-6s %-6s %s\n", 'index', 'type', 'title');
+    }
+
+    $ret .= SIRD_CreateLink($hash->{helper}{CL}{TYPE}, $name, '&lt;&lt;BACK', -1, 2);
+
+    while ($nav =~ /(\d+):([^:]+):(\d+),?/g)
+    {
+      $ret .= SIRD_CreateLink($hash->{helper}{CL}{TYPE}, $name, $2, $1, $3);
+
+      $lastIndex = $1;
+    }
+
+    if ($nav =~ /NEXT\>\>$/)
+    {
+      $ret .= SIRD_CreateLink($hash->{helper}{CL}{TYPE}, $name, 'NEXT&gt;&gt;', $lastIndex, 3);
+    }
+
+    if ('FHEMWEB' eq $hash->{helper}{CL}{TYPE})
+    {
+      $ret .= '</div></div></html>';
+    }
+
+    asyncOutput($hash->{helper}{CL}, $ret);
+  }
+  else
+  {
+    Log3 $name, 3, $name.': asyncOutput not supported!';
+  }
+
+  Log3 $name, 5, $name.': Blocking call finished to read navigation items.';
+
+  delete($hash->{helper}{RUNNING_PID});
+}
+
+
+sub SIRD_AbortNavigation($)
+{
+  my ($hash) = @_;
+  my $name = $hash->{NAME};
+
+  delete($hash->{helper}{RUNNING_PID});
+
+  Log3 $name, 3, $name.': Blocking call aborted';
+}
+
+
 sub SIRD_Update($)
 {
   my ($hash) = @_;
@@ -317,13 +636,17 @@ sub SIRD_Update($)
 
   if (1 == AttrVal($name, 'compatibilityMode', 1))
   {
-    SIRD_SendRequest($hash, 'GET', 'netRemote.nav.state', 0, \&SIRD_ParseGeneral);
-    SIRD_SendRequest($hash, 'GET', 'netRemote.nav.status', 0, \&SIRD_ParseGeneral);
-    SIRD_SendRequest($hash, 'GET', 'netRemote.nav.caps', 0, \&SIRD_ParseGeneral);
-    SIRD_SendRequest($hash, 'GET', 'netRemote.nav.numItems', 0, \&SIRD_ParseGeneral);
-    SIRD_SendRequest($hash, 'GET', 'netRemote.nav.depth', 0, \&SIRD_ParseGeneral);
-    SIRD_SendRequest($hash, 'GET', 'netRemote.sys.info.version', 0, \&SIRD_ParseGeneral);
-    SIRD_SendRequest($hash, 'GET', 'netRemote.sys.info.friendlyName', 0, \&SIRD_ParseGeneral);
+    unshift(@SIRD_queue, ['GET', 'netRemote.nav.state', 0, \&SIRD_ParseGeneral]);
+    unshift(@SIRD_queue, ['GET', 'netRemote.nav.status', 0, \&SIRD_ParseGeneral]);
+    unshift(@SIRD_queue, ['GET', 'netRemote.nav.caps', 0, \&SIRD_ParseGeneral]);
+    unshift(@SIRD_queue, ['GET', 'netRemote.nav.numItems', 0, \&SIRD_ParseGeneral]);
+
+    # run dequeue
+    SIRD_DeQueue($name);
+
+    unshift(@SIRD_queue, ['GET', 'netRemote.nav.depth', 0, \&SIRD_ParseGeneral]);
+    unshift(@SIRD_queue, ['GET', 'netRemote.sys.info.version', 0, \&SIRD_ParseGeneral]);
+    unshift(@SIRD_queue, ['GET', 'netRemote.sys.info.friendlyName', 0, \&SIRD_ParseGeneral]);
   }
   else
   {
@@ -348,27 +671,26 @@ sub SIRD_Update($)
   {
     if (1 == AttrVal($name, 'compatibilityMode', 1))
     {
-      InternalTimer(gettimeofday() + 2, 'SIRD_UpdateA', $name, 0);
-
-      #SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.name', 0, \&SIRD_ParseGeneral);
-      #SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.description', 0, \&SIRD_ParseGeneral);
-      #SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.albumDescription', 0, \&SIRD_ParseGeneral);
-      #SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.artistDescription', 0, \&SIRD_ParseGeneral);
-      #SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.duration', 0, \&SIRD_ParseGeneral);
-      #SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.artist', 0, \&SIRD_ParseGeneral);
-      #SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.album', 0, \&SIRD_ParseGeneral);
-      #SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.graphicUri', 0, \&SIRD_ParseGeneral);
-      #SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.text', 0, \&SIRD_ParseGeneral);
-      #SIRD_SendRequest($hash, 'GET', 'netRemote.sys.mode', 0, \&SIRD_ParseGeneral);
-      #SIRD_SendRequest($hash, 'GET', 'netRemote.play.status', 0, \&SIRD_ParseGeneral);
-      #SIRD_SendRequest($hash, 'GET', 'netRemote.play.caps', 0, \&SIRD_ParseGeneral);
-      #SIRD_SendRequest($hash, 'GET', 'netRemote.play.errorStr', 0, \&SIRD_ParseGeneral);
-      #SIRD_SendRequest($hash, 'GET', 'netRemote.play.position', 0, \&SIRD_ParseGeneral);
-      #SIRD_SendRequest($hash, 'GET', 'netRemote.play.repeat', 0, \&SIRD_ParseGeneral);
-      #SIRD_SendRequest($hash, 'GET', 'netRemote.play.shuffle', 0, \&SIRD_ParseGeneral);
-      #SIRD_SendRequest($hash, 'GET', 'netRemote.sys.caps.volumeSteps', 0, \&SIRD_ParseGeneral);
-      #SIRD_SendRequest($hash, 'GET', 'netRemote.sys.audio.volume', 0, \&SIRD_ParseGeneral);
-      #SIRD_SendRequest($hash, 'GET', 'netRemote.sys.audio.mute', 0, \&SIRD_ParseGeneral);
+      unshift(@SIRD_queue, ['GET', 'netRemote.play.info.name', 0, \&SIRD_ParseGeneral]);
+      unshift(@SIRD_queue, ['GET', 'netRemote.play.info.description', 0, \&SIRD_ParseGeneral]);
+      unshift(@SIRD_queue, ['GET', 'netRemote.play.info.albumDescription', 0, \&SIRD_ParseGeneral]);
+      unshift(@SIRD_queue, ['GET', 'netRemote.play.info.artistDescription', 0, \&SIRD_ParseGeneral]);
+      unshift(@SIRD_queue, ['GET', 'netRemote.play.info.duration', 0, \&SIRD_ParseGeneral]);
+      unshift(@SIRD_queue, ['GET', 'netRemote.play.info.artist', 0, \&SIRD_ParseGeneral]);
+      unshift(@SIRD_queue, ['GET', 'netRemote.play.info.album', 0, \&SIRD_ParseGeneral]);
+      unshift(@SIRD_queue, ['GET', 'netRemote.play.info.graphicUri', 0, \&SIRD_ParseGeneral]);
+      unshift(@SIRD_queue, ['GET', 'netRemote.play.info.text', 0, \&SIRD_ParseGeneral]);
+      unshift(@SIRD_queue, ['GET', 'netRemote.nav.numItems', 0, \&SIRD_ParseGeneral]);
+      unshift(@SIRD_queue, ['GET', 'netRemote.sys.mode', 0, \&SIRD_ParseGeneral]);
+      unshift(@SIRD_queue, ['GET', 'netRemote.play.status', 0, \&SIRD_ParseGeneral]);
+      unshift(@SIRD_queue, ['GET', 'netRemote.play.caps', 0, \&SIRD_ParseGeneral]);
+      unshift(@SIRD_queue, ['GET', 'netRemote.play.errorStr', 0, \&SIRD_ParseGeneral]);
+      unshift(@SIRD_queue, ['GET', 'netRemote.play.position', 0, \&SIRD_ParseGeneral]);
+      unshift(@SIRD_queue, ['GET', 'netRemote.play.repeat', 0, \&SIRD_ParseGeneral]);
+      unshift(@SIRD_queue, ['GET', 'netRemote.play.shuffle', 0, \&SIRD_ParseGeneral]);
+      unshift(@SIRD_queue, ['GET', 'netRemote.sys.caps.volumeSteps', 0, \&SIRD_ParseGeneral]);
+      unshift(@SIRD_queue, ['GET', 'netRemote.sys.audio.volume', 0, \&SIRD_ParseGeneral]);
+      unshift(@SIRD_queue, ['GET', 'netRemote.sys.audio.mute', 0, \&SIRD_ParseGeneral]);
     }
     else
     {
@@ -380,7 +702,8 @@ sub SIRD_Update($)
                                               'node=netRemote.play.info.artist&'.
                                               'node=netRemote.play.info.album&'.
                                               'node=netRemote.play.info.graphicUri&'.
-                                              'node=netRemote.play.info.text&', 0, \&SIRD_ParseMultiple);
+                                              'node=netRemote.play.info.text&'.
+                                              'node=netRemote.nav.numItems&', 0, \&SIRD_ParseMultiple);
 
       SIRD_SendRequest($hash, 'GET_MULTIPLE', 'node=netRemote.sys.mode&'.
                                               'node=netRemote.play.status&'.
@@ -422,66 +745,29 @@ sub SIRD_Update($)
 }
 
 
-sub SIRD_UpdateA($)
-{
-  my ($name) = @_;
-  my $hash = $defs{$name};
-
-  SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.name', 0, \&SIRD_ParseGeneral);
-  SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.description', 0, \&SIRD_ParseGeneral);
-  SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.albumDescription', 0, \&SIRD_ParseGeneral);
-  SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.artistDescription', 0, \&SIRD_ParseGeneral);
-  SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.duration', 0, \&SIRD_ParseGeneral);
-  SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.artist', 0, \&SIRD_ParseGeneral);
-  SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.album', 0, \&SIRD_ParseGeneral);
-  SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.graphicUri', 0, \&SIRD_ParseGeneral);
-  SIRD_SendRequest($hash, 'GET', 'netRemote.play.info.text', 0, \&SIRD_ParseGeneral);
-  SIRD_SendRequest($hash, 'GET', 'netRemote.sys.mode', 0, \&SIRD_ParseGeneral);
-
-  InternalTimer(gettimeofday() + 2, 'SIRD_UpdateB', $name, 0);
-}
-
-
-sub SIRD_UpdateB($)
-{
-  my ($name) = @_;
-  my $hash = $defs{$name};
-
-  SIRD_SendRequest($hash, 'GET', 'netRemote.play.status', 0, \&SIRD_ParseGeneral);
-  SIRD_SendRequest($hash, 'GET', 'netRemote.play.caps', 0, \&SIRD_ParseGeneral);
-  SIRD_SendRequest($hash, 'GET', 'netRemote.play.errorStr', 0, \&SIRD_ParseGeneral);
-  SIRD_SendRequest($hash, 'GET', 'netRemote.play.position', 0, \&SIRD_ParseGeneral);
-  SIRD_SendRequest($hash, 'GET', 'netRemote.play.repeat', 0, \&SIRD_ParseGeneral);
-  SIRD_SendRequest($hash, 'GET', 'netRemote.play.shuffle', 0, \&SIRD_ParseGeneral);
-  SIRD_SendRequest($hash, 'GET', 'netRemote.sys.caps.volumeSteps', 0, \&SIRD_ParseGeneral);
-  SIRD_SendRequest($hash, 'GET', 'netRemote.sys.audio.volume', 0, \&SIRD_ParseGeneral);
-  SIRD_SendRequest($hash, 'GET', 'netRemote.sys.audio.mute', 0, \&SIRD_ParseGeneral);
-}
-
-
 sub SIRD_ClearReadings($)
 {
   my ($hash) = @_;
   my $name = $hash->{NAME};
 
-  readingsBulkUpdate($hash, 'currentTitle', '') if ('' ne ReadingsVal($name, 'currentTitle', ''));
-  readingsBulkUpdate($hash, 'description', '') if ('' ne ReadingsVal($name, 'description', ''));
-  readingsBulkUpdate($hash, 'currentAlbumDescription', '') if ('' ne ReadingsVal($name, 'currentAlbumDescription', ''));
-  readingsBulkUpdate($hash, 'currentArtistDescription', '') if ('' ne ReadingsVal($name, 'currentArtistDescription', ''));
-  readingsBulkUpdate($hash, 'duration', '') if ('' ne ReadingsVal($name, 'duration', ''));
-  readingsBulkUpdate($hash, 'currentArtist', '') if ('' ne ReadingsVal($name, 'currentArtist', ''));
-  readingsBulkUpdate($hash, 'currentAlbum', '') if ('' ne ReadingsVal($name, 'currentAlbum', ''));
-  readingsBulkUpdate($hash, 'graphicUri', '') if ('' ne ReadingsVal($name, 'graphicUri', ''));
-  readingsBulkUpdate($hash, 'infoText', '') if ('' ne ReadingsVal($name, 'infoText', ''));
-  readingsBulkUpdate($hash, 'playStatus', '') if ('' ne ReadingsVal($name, 'playStatus', ''));
-  readingsBulkUpdate($hash, 'errorStr', '') if ('' ne ReadingsVal($name, 'errorStr', ''));
-  readingsBulkUpdate($hash, 'position', '') if ('' ne ReadingsVal($name, 'position', ''));
-  readingsBulkUpdate($hash, 'repeat', '') if ('' ne ReadingsVal($name, 'repeat', ''));
-  readingsBulkUpdate($hash, 'shuffle', '') if ('' ne ReadingsVal($name, 'shuffle', ''));
-  readingsBulkUpdate($hash, 'volume', '') if ('' ne ReadingsVal($name, 'volume', ''));
-  readingsBulkUpdate($hash, 'volumeStraight', '') if ('' ne ReadingsVal($name, 'volumeStraight', ''));
-  readingsBulkUpdate($hash, 'mute', '') if ('' ne ReadingsVal($name, 'mute', ''));
-  readingsBulkUpdate($hash, 'input', '') if ('' ne ReadingsVal($name, 'input', ''));
+  readingsBulkUpdateIfChanged($hash, 'currentTitle', '');
+  readingsBulkUpdateIfChanged($hash, 'description', '');
+  readingsBulkUpdateIfChanged($hash, 'currentAlbumDescription', '');
+  readingsBulkUpdateIfChanged($hash, 'currentArtistDescription', '');
+  readingsBulkUpdateIfChanged($hash, 'duration', '');
+  readingsBulkUpdateIfChanged($hash, 'currentArtist', '');
+  readingsBulkUpdateIfChanged($hash, 'currentAlbum', '');
+  readingsBulkUpdateIfChanged($hash, 'graphicUri', '');
+  readingsBulkUpdateIfChanged($hash, 'infoText', '');
+  readingsBulkUpdateIfChanged($hash, 'playStatus', '');
+  readingsBulkUpdateIfChanged($hash, 'errorStr', '');
+  readingsBulkUpdateIfChanged($hash, 'position', '');
+  readingsBulkUpdateIfChanged($hash, 'repeat', '');
+  readingsBulkUpdateIfChanged($hash, 'shuffle', '');
+  readingsBulkUpdateIfChanged($hash, 'volume', '');
+  readingsBulkUpdateIfChanged($hash, 'volumeStraight', '');
+  readingsBulkUpdateIfChanged($hash, 'mute', '');
+  readingsBulkUpdateIfChanged($hash, 'input', '');
 }
 
 
@@ -495,65 +781,65 @@ sub SIRD_SetReadings($)
   {
     $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
 
-    readingsBulkUpdate($hash, 'currentTitle', $reading) if ($reading ne ReadingsVal($name, 'currentTitle', ''));
+    readingsBulkUpdateIfChanged($hash, 'currentTitle', $reading);
   }
   elsif ('netRemote.play.info.description' eq $_->{node})
   {
     $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
 
-    readingsBulkUpdate($hash, 'description', $reading) if ($reading ne ReadingsVal($name, 'description', ''));
+    readingsBulkUpdateIfChanged($hash, 'description', $reading);
   }
   elsif ('netRemote.play.info.albumDescription' eq $_->{node})
   {
     $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
 
-    readingsBulkUpdate($hash, 'currentAlbumDescription', $reading) if ($reading ne ReadingsVal($name, 'currentAlbumDescription', ''));
+    readingsBulkUpdateIfChanged($hash, 'currentAlbumDescription', $reading);
   }
   elsif ('netRemote.play.info.artistDescription' eq $_->{node})
   {
     $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
 
-    readingsBulkUpdate($hash, 'currentArtistDescription', $reading) if ($reading ne ReadingsVal($name, 'currentArtistDescription', ''));
+    readingsBulkUpdateIfChanged($hash, 'currentArtistDescription', $reading);
   }
   elsif ('netRemote.play.info.duration' eq $_->{node})
   {
-    readingsBulkUpdate($hash, 'duration', $_->{value}->{u32}) if ($_->{value}->{u32} ne ReadingsVal($name, 'duration', ''));
+    readingsBulkUpdateIfChanged($hash, 'duration', $_->{value}->{u32});
   }
   elsif ('netRemote.play.info.artist' eq $_->{node})
   {
     $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
 
-    readingsBulkUpdate($hash, 'currentArtist', $reading) if ($reading ne ReadingsVal($name, 'currentArtist', ''));
+    readingsBulkUpdateIfChanged($hash, 'currentArtist', $reading);
   }
   elsif ('netRemote.play.info.album' eq $_->{node})
   {
     $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
 
-    readingsBulkUpdate($hash, 'currentAlbum', $reading) if ($reading ne ReadingsVal($name, 'currentAlbum', ''));
+    readingsBulkUpdateIfChanged($hash, 'currentAlbum', $reading);
   }
   elsif ('netRemote.play.info.graphicUri' eq $_->{node})
   {
     $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
 
-    readingsBulkUpdate($hash, 'graphicUri', $reading) if ($reading ne ReadingsVal($name, 'graphicUri', ''));
+    readingsBulkUpdateIfChanged($hash, 'graphicUri', $reading);
   }
   elsif ('netRemote.play.info.text' eq $_->{node})
   {
     $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
 
-    readingsBulkUpdate($hash, 'infoText', $reading) if ($reading ne ReadingsVal($name, 'infoText', ''));
+    readingsBulkUpdateIfChanged($hash, 'infoText', $reading);
   }
   elsif ('netRemote.sys.info.version' eq $_->{node})
   {
     $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
 
-    readingsBulkUpdate($hash, 'version', $reading) if ($reading ne ReadingsVal($name, 'version', ''));
+    readingsBulkUpdateIfChanged($hash, 'version', $reading);
   }
   elsif ('netRemote.sys.info.friendlyName' eq $_->{node})
   {
     $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
 
-    readingsBulkUpdate($hash, 'friendlyName', $reading) if ($reading ne ReadingsVal($name, 'friendlyName', ''));
+    readingsBulkUpdateIfChanged($hash, 'friendlyName', $reading);
   }
   elsif ('netRemote.sys.mode' eq $_->{node})
   {
@@ -561,7 +847,7 @@ sub SIRD_SetReadings($)
 
     if ($inputReading =~ /$_->{value}->{u32}:(.*?)(?:,|$)/)
     {
-      readingsBulkUpdate($hash, 'input', $1);
+      readingsBulkUpdateIfChanged($hash, 'input', $1);
     }
   }
   elsif ('netRemote.play.status' eq $_->{node})
@@ -569,13 +855,13 @@ sub SIRD_SetReadings($)
     my @result = ('idle', 'buffering', 'playing', 'paused', 'rebuffering', 'error', 'stopped');
     $reading = ($_->{value}->{u8} < 7 ? $result[$_->{value}->{u8}] : 'unknown');
 
-    readingsBulkUpdate($hash, 'playStatus', $reading) if ($reading ne ReadingsVal($name, 'playStatus', ''));
+    readingsBulkUpdateIfChanged($hash, 'playStatus', $reading);
   }
   elsif ('netRemote.play.errorStr' eq $_->{node})
   {
     $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
 
-    readingsBulkUpdate($hash, 'errorStr', $reading) if ($reading ne ReadingsVal($name, 'errorStr', ''));
+    readingsBulkUpdateIfChanged($hash, 'errorStr', $reading);
   }
   elsif ('netRemote.play.position' eq $_->{node})
   {
@@ -583,48 +869,52 @@ sub SIRD_SetReadings($)
     my $seconds = ($_->{value}->{u32} / 1000) - (($_->{value}->{u32} / 60000) * 60);
     $reading = sprintf("%d:%02d", $minutes, $seconds);
 
-    readingsBulkUpdate($hash, 'position', $reading) if ($reading ne ReadingsVal($name, 'position', ''));
+    readingsBulkUpdateIfChanged($hash, 'position', $reading);
   }
   elsif ('netRemote.play.repeat' eq $_->{node})
   {
     $reading = (1 == $_->{value}->{u8} ? 'on' : 'off');
 
-    readingsBulkUpdate($hash, 'repeat', $reading) if ($reading ne ReadingsVal($name, 'repeat', ''));
+    readingsBulkUpdateIfChanged($hash, 'repeat', $reading);
   }
   elsif ('netRemote.play.shuffle' eq $_->{node})
   {
     $reading = (1 == $_->{value}->{u8} ? 'on' : 'off');
 
-    readingsBulkUpdate($hash, 'shuffle', $reading) if ($reading ne ReadingsVal($name, 'shuffle', ''));
+    readingsBulkUpdateIfChanged($hash, 'shuffle', $reading);
   }
   elsif ('netRemote.sys.caps.volumeSteps' eq $_->{node})
   {
-    readingsBulkUpdate($hash, '.volumeSteps', ($_->{value}->{u8} > 20 && $_->{value}->{u8} < 99 ? $_->{value}->{u8} - 1 : 20));
+    readingsBulkUpdateIfChanged($hash, '.volumeSteps', ($_->{value}->{u8} > 20 && $_->{value}->{u8} < 99 ? $_->{value}->{u8} - 1 : 20));
   }
   elsif ('netRemote.sys.audio.volume' eq $_->{node})
   {
     my $volumeSteps = ReadingsVal($name, '.volumeSteps', 20);
 
-    readingsBulkUpdate($hash, 'volume', int($_->{value}->{u8} * (100 / $volumeSteps))) if (ReadingsVal($name, 'volume', -1) ne int($_->{value}->{u8} * (100 / $volumeSteps)));
-    readingsBulkUpdate($hash, 'volumeStraight', int($_->{value}->{u8})) if (ReadingsVal($name, 'volumeStraight', -1) ne int($_->{value}->{u8}));
+    readingsBulkUpdateIfChanged($hash, 'volume', int($_->{value}->{u8} * (100 / $volumeSteps)));
+    readingsBulkUpdateIfChanged($hash, 'volumeStraight', int($_->{value}->{u8}));
   }
   elsif ('netRemote.sys.audio.mute' eq $_->{node})
   {
     $reading = (1 == $_->{value}->{u8} ? 'on' : 'off');
 
-    readingsBulkUpdate($hash, 'mute', $reading) if ($reading ne ReadingsVal($name, 'mute', ''));
+    readingsBulkUpdateIfChanged($hash, 'mute', $reading);
   }
   elsif (('netRemote.nav.state' eq $_->{node}) && (0 == $_->{value}->{u8}))
   {
     # enable navigation if needed!!!
     SIRD_SendRequest($hash, 'SET', 'netRemote.nav.state', 1, \&SIRD_ParseNavState);
   }
+  elsif ('netRemote.nav.numItems' eq $_->{node})
+  {
+    readingsBulkUpdateIfChanged($hash, '.numNav', $_->{value}->{s32} - 1);
+  }
 }
 
 
-sub SIRD_SendRequest($$$$$)
+sub SIRD_SendRequest($$$$$;$)
 {
-  my ($hash, $cmd, $request, $value, $callback) = @_;
+  my ($hash, $cmd, $request, $value, $callback, $cl) = @_;
   my $name = $hash->{NAME};
   my $ip = InternalVal($name, 'IP', undef);
   my $pin = InternalVal($name, 'PIN', '1234');
@@ -672,6 +962,15 @@ sub SIRD_SendRequest($$$$$)
                   method     => 'GET',
                   callback   => $callback
                 };
+
+    if (defined($cl))
+    {
+      $param->{cl} = $cl;
+    }
+    else
+    {
+      $param->{cl} = $hash->{CL};
+    }
 
     HttpUtils_NonblockingGet($param);
   }
@@ -1126,7 +1425,7 @@ sub SIRD_ParseInputs($$$)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
-    eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => ['item']);};
+    eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => ['item', 'field']);};
 
     if (!$@ && ('FS_OK' eq $xml->{status}))
     {
@@ -1243,6 +1542,95 @@ sub SIRD_ParsePresets($$$)
 }
 
 
+sub SIRD_ParseNavigation($$$)
+{
+  my ($param, $err, $data) = @_;
+  my $hash = $param->{hash};
+  my $name = $hash->{NAME};
+  my $xml;
+
+  if ('' ne $err)
+  {
+    Log3 $name, 3, $name.': Error while requesting '.$param->{url}.' - '.$err;
+  }
+  elsif ('' ne $data)
+  {
+    Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
+
+    eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => ['item', 'field']);};
+
+    if (!$@ && ('FS_OK' eq $xml->{status}))
+    {
+      if ('SET' eq $param->{cmd})
+      {
+        if ('netRemote.nav.action.navigate' eq $param->{request})
+        {
+          SIRD_StartNavigation($hash, -1, 2, $param->{cl});
+        }
+      }
+      else
+      {
+        my $nav = '';
+
+        Log3 $name, 5, $name.': Navigation '.$param->{cmd}.' successful.';
+
+        foreach my $item (@{$xml->{item}})
+        {
+          if (exists($item->{key}) && exists($item->{field}) && (scalar(@{$item->{field}}) >= 1))
+          {
+            my $type = undef;
+            my $name = undef;
+
+            foreach my $field (@{$item->{field}})
+            {
+              if (exists($field->{name}) && ('name' eq $field->{name}) && !ref($field->{c8_array}))
+              {
+                $_ = $field->{c8_array};
+                $_ =~ s/[^0-9a-zA-Z\.\-\_]+//g;
+
+                $name = $item->{key}.':'.$_;
+              }
+
+              if (exists($field->{name}) && ('type' eq $field->{name}))
+              {
+                $type = $field->{u8};
+              }
+            }
+
+            if (defined($name) && defined($type))
+            {
+              $nav .= ',' if ('' ne $nav);
+              $nav .= $name.':'.$type;
+            }
+          }
+        }
+
+        $nav =~ s/\s//g;
+
+        if ('' ne $nav)
+        {
+          if ($nav ne ReadingsVal($name, '.nav', ''))
+          {
+            readingsSingleUpdate($hash, '.nav', $nav, 1);
+          }
+        }
+        else
+        {
+          Log3 $name, 3, $name.': Something went wrong by parsing the navigation.';
+        }
+      }
+    }
+    else
+    {
+      if ('LIST_GET_NEXT' eq $param->{cmd})
+      {
+        readingsSingleUpdate($hash, '.nav', '', 1);
+      }
+    }
+  }
+}
+
+
 1;
 
 =pod
@@ -1295,6 +1683,15 @@ sub SIRD_ParsePresets($$$)
     <br>
   </ul>
   <br><br>
+  <a name="SIRDget"></a>
+  <b>Get</b>
+  <ul>
+    <li>inputs - retrieve all inputs from the radio to be used as set command (normally part of the background update process)</li>
+    <li>presets - retrieve all presets from the radio to be used as set command (normally part of the background update process)</li>
+    <li>ls - list all available navigation items (works for FHEMWEB and Telnet only). To navigate with telnet just run get &lt;device&gt; ls first and afterwards: get &lt;device&gt; ls &lt;index&gt; &lt;type&gt;.</li>
+    <br>
+  </ul>
+  <br><br>
   <a name="SIRDattribute"></a>
   <b>Attributes</b>
   <ul>
@@ -1302,6 +1699,7 @@ sub SIRD_ParsePresets($$$)
     <li><b>autoLogin:</b> module tries to automatically login into the radio if needed (default: auto login activated)<br></li>
     <li><b>playCommands:</b> can be used to define the mapping of play commands (default: 0:stop,1:play,2:pause,3:next,4:previous)<br></li>
     <li><b>compatibilityMode:</b> This mode is activated by default and should work for all radios. It is highly recommended to disable the compatibility mode if possible because it needs a lot of ressources.<br></li>
+    <li><b>maxNavigationItems:</b> maximum number of navigation items to get by each ls command (default: 100)<br></li>
     <br>
   </ul>
 </ul>

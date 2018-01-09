@@ -1,4 +1,4 @@
- - timeouts fixed (dirty hack - rework needed)
- - inputs fixed
- - SetExtensions added
- - volume problem fixed
+ - ls get command added
+ - queue implemented for the compatibility mode
+ - attribute maxNavigationItems added
+ - version information added
