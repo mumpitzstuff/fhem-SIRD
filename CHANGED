@@ -1,4 +1,4 @@
- - ls get command added
- - queue implemented for the compatibility mode
- - attribute maxNavigationItems added
- - version information added
+ - speak for up to 100 chars added
+ - attributes ttsInput, ttsLanguage and ttsVolume added
+ - volume reading is always available independent from on/off state of the radio
+ - version incremented 1.0.1 to 1.1.0

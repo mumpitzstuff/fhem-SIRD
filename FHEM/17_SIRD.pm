@@ -39,6 +39,9 @@ sub SIRD_Initialize($)
                       'compatibilityMode:0,1 '.
                       'playCommands '.
                       'maxNavigationItems '.
+                      'ttsInput '.
+                      'ttsLanguage '.
+                      'ttsVolume '.
                       $readingFnAttributes;
 
   return undef;
@@ -61,7 +64,9 @@ sub SIRD_Define($$)
   $hash->{IP} = $ip;
   $hash->{PIN} = $pin;
   $hash->{INTERVAL} = $interval;
-  $hash->{VERSION} = '1.0.1';
+  $hash->{VERSION} = '1.1.0';
+
+  $hash->{helper}{suspendUpdate} = 0;
 
   readingsSingleUpdate($hash, 'state', 'Initialized', 1);
 
@@ -79,6 +84,7 @@ sub SIRD_Undefine($$)
   SetExtensionsCancel($hash);
   HttpUtils_Close($hash);
   SIRD_AbortNavigation($hash);
+  SIRD_AbortSpeak($hash);
 
   return undef;
 }
@@ -156,7 +162,7 @@ sub SIRD_Attr($$$$) {
     }
     elsif ('maxNavigationItems' eq $attribute)
     {
-      if (($value !~ /^\d+$/) && ($value < 1))
+      if (($value !~ /^\d+$/) || ($value < 1))
       {
         return 'maxNavigationItems must be a number greater than 0';
       }
@@ -254,6 +260,31 @@ sub SIRD_Set($$@) {
   {
     SIRD_SendRequest($hash, 'SET', 'netRemote.play.repeat', ('on' eq $arg ? 1 : 0), \&SIRD_ParseRepeat);
   }
+  elsif ('speak' eq $cmd)
+  {
+    my $text = '';
+    my $ttsInput = AttrVal($name, 'ttsInput', 'dmr');
+    my $input = ReadingsVal($name, 'input', undef);
+
+    eval { $text = encode_base64(join(' ', @args)) };
+
+    if (defined($input) && ($ttsInput eq $input))
+    {
+      $ttsInput = '';
+    }
+    elsif ($inputReading =~ /(\d+):$ttsInput/)
+    {
+      $ttsInput = $1;
+    }
+    else
+    {
+      $ttsInput = '';
+    }
+
+    SIRD_StartSpeak($hash, $text, $input, $ttsInput, $volumeSteps, $hash->{CL});
+
+    return undef;
+  }
   elsif ('statusRequest' eq $cmd)
   {
     # do nothing here (readings already refreshed at the end)
@@ -266,7 +297,7 @@ sub SIRD_Set($$@) {
   else
   {
     my $list = 'login:noArg on:noArg off:noArg mute:on,off,toggle shuffle:on,off repeat:on,off stop:noArg play:noArg pause:noArg next:noArg previous:noArg '.
-               'on-for-timer off-for-timer on-till off-till on-till-overnight off-till-overnight intervals toggle:noArg '.
+               'on-for-timer off-for-timer on-till off-till on-till-overnight off-till-overnight intervals toggle:noArg speak '.
                'volume:slider,0,1,100 volumeStraight:slider,0,1,'.$volumeSteps.' statusRequest:noArg input:'.$inputs.' preset:'.$presets;
 
     return 'Unknown argument '.$cmd.', choose one of '.$list;
@@ -421,7 +452,7 @@ sub SIRD_StartNavigation($$$;$)
 
   if (exists($hash->{helper}{RUNNING_PID}))
   {
-    Log3 $name, 3, $name.': Blocking call already running';
+    Log3 $name, 3, $name.': Blocking call already running (navigation).';
 
     SIRD_AbortNavigation($hash);
   }
@@ -619,7 +650,257 @@ sub SIRD_AbortNavigation($)
 
   delete($hash->{helper}{RUNNING_PID});
 
-  Log3 $name, 3, $name.': Blocking call aborted';
+  Log3 $name, 3, $name.': Blocking call aborted (navigation).';
+}
+
+
+sub SIRD_StartSpeak($$$$$;$)
+{
+  my ($hash, $text, $input, $ttsInput, $volumeSteps, $cl) = @_;
+  my $name = $hash->{NAME};
+  my $ip = InternalVal($name, 'IP', undef);
+  my $pin = InternalVal($name, 'PIN', '1234');
+  my $language = AttrVal($name, 'ttsLanguage', 'de');
+  my $power = ReadingsVal($name, 'power', 'on');
+  my $ttsVolume = AttrVal($name, 'ttsVolume', 25);
+  my $volume = ReadingsVal($name, 'volume', 25);
+
+  if (exists($hash->{helper}{RUNNING_PID1}))
+  {
+    Log3 $name, 3, $name.': Blocking call already running (speak).';
+
+    SIRD_AbortSpeak($hash);
+  }
+
+  if (length($text) > 100)
+  {
+    Log3 $name, 3, $name.': Too many chars for speak (more than 100).';
+  }
+
+  $hash->{helper}{CL} = (defined($cl) ? $cl : $hash->{CL});
+  $hash->{helper}{suspendUpdate} = 1;
+  @SIRD_queue = ();
+  $hash->{helper}{RUNNING_PID1} = BlockingCall('SIRD_DoSpeak', $name.'|'.$ip.'|'.$pin.'|'.$text.'|'.$language.'|'.$input.'|'.$ttsInput.'|'.$volume.'|'.$ttsVolume.'|'.$volumeSteps.'|'.$power, 'SIRD_EndSpeak', 120, 'SIRD_AbortSpeak', $hash);
+}
+
+
+sub SIRD_DoSpeak(@)
+{
+  my ($string) = @_;
+  my ($name, $ip, $pin, $text, $language, $input, $ttsInput, $volume, $ttsVolume, $volumeSteps, $power) = split("\\|", $string);
+  my $param;
+  my $err;
+  my $data;
+  my $xml;
+  my $retryCounter;
+
+  eval { $text = decode_base64($text) };
+
+  my $uri_text = uri_escape($text);
+  my $url = 'http://translate.google.com/translate_tts?ie=UTF-8&tl='.$language.'&client=tw-ob&q='.$uri_text;
+
+  $url =~ s/\&/\&amp\;/g;
+
+  Log3 $name, 5, $name.': Blocking call running to speak.';
+
+  if ('off' eq $power)
+  {
+    Log3 $name, 5, $name.': start power on.';
+
+    GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.power?pin='.$pin.'&value=1', 5, '', 1, 5);
+  }
+
+  if ('' ne $ttsInput)
+  {
+    Log3 $name, 5, $name.': start switch to dmr.';
+
+    $data = GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.mode?pin='.$pin.'&value='.$ttsInput, 5, '', 1, 5);
+    if ($data && ($data =~ /fsapiResponse/))
+    {
+      eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => []);};
+
+      if (!$@ && ('FS_OK' eq $xml->{status}))
+      {
+        $retryCounter = 0;
+
+        do
+        {
+          $data = GetFileFromURL('http://'.$ip.':80/fsapi/GET/netRemote.sys.mode?pin='.$pin, 5, '', 1, 5);
+          if ($data && ($data =~ /fsapiResponse/))
+          {
+            eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => []);};
+
+            if (!$@ && ('FS_OK' eq $xml->{status}))
+            {
+              if ($xml->{value}->{u32} == $ttsInput)
+              {
+                Log3 $name, 5, $name.': switch to dmr successfully completed. ('.$retryCounter.')';
+
+                $retryCounter = 10;
+              }
+            }
+          }
+
+          #sleep(1);
+          $retryCounter++;
+        } while ($retryCounter < 10);
+      }
+    }
+  }
+
+  $param = {
+              url        => 'http://'.$ip.':8080/AVTransport/control',
+              timeout    => 10,
+              header     => { 'Content-Type' => 'text/xml; charset=utf-8',
+                              'SOAPAction' => '"urn:schemas-upnp-org:service:AVTransport:1#Stop"' },
+              data       => '<?xml version="1.0" encoding="utf-8"?>'.
+                            '<s:Envelope s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/" xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">'.
+                            '<s:Body><u:Stop xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'.
+                            '<InstanceID>0</InstanceID></u:Stop></s:Body></s:Envelope>',
+              #loglevel   => 3,
+              method     => 'POST'
+           };
+
+  ($err, $data) = HttpUtils_BlockingGet($param);
+
+  if ('' ne $err)
+  {
+    Log3 $name, 3, $name.': Something went wrong by setting Stop. ('.$err.')';
+  }
+  else
+  {
+    Log3 $name, 5, $name.': '.Dumper($data);
+  }
+
+  $param = {
+              url        => 'http://'.$ip.':8080/AVTransport/control',
+              timeout    => 10,
+              header     => { 'Content-Type' => 'text/xml; charset=utf-8',
+                              'SOAPAction' => '"urn:schemas-upnp-org:service:AVTransport:1#SetAVTransportURI"' },
+              data       => '<?xml version="1.0" encoding="utf-8"?>'.
+                            '<s:Envelope s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/" xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">'.
+                            '<s:Body><u:SetAVTransportURI xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'.
+                            '<InstanceID>0</InstanceID><CurrentURI>'.$url.'</CurrentURI><CurrentURIMetaData>'.
+                            '</CurrentURIMetaData></u:SetAVTransportURI></s:Body></s:Envelope>',
+              #loglevel   => 3,
+              method     => 'POST'
+            };
+
+  ($err, $data) = HttpUtils_BlockingGet($param);
+
+  if ('' ne $err)
+  {
+    Log3 $name, 3, $name.': Something went wrong by setting AVTransportURI. ('.$err.')';
+
+    return $name;
+  }
+  else
+  {
+    Log3 $name, 5, $name.': '.Dumper($param);
+    Log3 $name, 5, $name.': '.Dumper($data);
+  }
+
+  sleep(2);
+
+  if ($volume != $ttsVolume)
+  {
+    GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.audio.volume?pin='.$pin.'&value='.int($ttsVolume / (100 / $volumeSteps)), 5, '', 1, 5);
+  }
+
+  $param = {
+              url        => 'http://'.$ip.':8080/AVTransport/control',
+              timeout    => 10,
+              header     => { 'Content-Type' => 'text/xml; charset=utf-8',
+                              'SOAPAction' => '"urn:schemas-upnp-org:service:AVTransport:1#Play"' },
+              data       => '<?xml version="1.0" encoding="utf-8"?>'.
+                            '<s:Envelope s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/" xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">'.
+                            '<s:Body><u:Play xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'.
+                            '<InstanceID>0</InstanceID><Speed>1</Speed></u:Play></s:Body></s:Envelope>',
+              #loglevel   => 3,
+              method     => 'POST'
+           };
+
+  ($err, $data) = HttpUtils_BlockingGet($param);
+
+  if ('' ne $err)
+  {
+    Log3 $name, 3, $name.': Something went wrong by setting Play. ('.$err.')';
+  }
+  else
+  {
+    Log3 $name, 5, $name.': '.Dumper($data);
+  }
+
+  $retryCounter = 0;
+  do
+  {
+    sleep(2);
+
+    $data = GetFileFromURL('http://'.$ip.':80/fsapi/GET/netRemote.play.status?pin='.$pin, 5, '', 1, 5);
+    if ($data && ($data =~ /fsapiResponse/))
+    {
+      eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => []);};
+
+      if (!$@ && ('FS_OK' eq $xml->{status}))
+      {
+        #Log3 $name, 3, $name.': '.Dumper($xml);
+
+        if (0 == $xml->{value}->{u8})
+        {
+          Log3 $name, 5, $name.': speak command completed. ('.$retryCounter.')';
+
+          $retryCounter = 60;
+        }
+      }
+    }
+
+    $retryCounter++;
+  } while ($retryCounter < 60);
+
+  if ($volume != $ttsVolume)
+  {
+    GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.audio.volume?pin='.$pin.'&value='.int($volume / (100 / $volumeSteps)), 5, '', 1, 5);
+
+    sleep(2);
+  }
+
+  if ('' ne $ttsInput)
+  {
+    GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.mode?pin='.$pin.'&value='.$input, 5, '', 1, 5);
+  }
+
+  if ('off' eq $power)
+  {
+    GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.power?pin='.$pin.'&value=0', 5, '', 1, 5);
+  }
+
+  return $name;
+}
+
+
+sub SIRD_EndSpeak($)
+{
+  my ($name) = @_;
+  my $hash = $defs{$name};
+
+  Log3 $name, 5, $name.': Blocking call finished to speak.';
+
+  $hash->{helper}{suspendUpdate} = 0;
+
+  delete($hash->{helper}{RUNNING_PID1});
+}
+
+
+sub SIRD_AbortSpeak($)
+{
+  my ($hash) = @_;
+  my $name = $hash->{NAME};
+
+  $hash->{helper}{suspendUpdate} = 0;
+
+  delete($hash->{helper}{RUNNING_PID1});
+
+  Log3 $name, 3, $name.': Blocking call aborted (speak).';
 }
 
 
@@ -632,13 +913,15 @@ sub SIRD_Update($)
 
   SIRD_SetNextTimer($hash, undef);
 
+  return undef if ($hash->{helper}{suspendUpdate});
+
   SIRD_SendRequest($hash, 'GET', 'netRemote.sys.power', 0, \&SIRD_ParsePower);
 
   if (1 == AttrVal($name, 'compatibilityMode', 1))
   {
     unshift(@SIRD_queue, ['GET', 'netRemote.nav.state', 0, \&SIRD_ParseGeneral]);
     unshift(@SIRD_queue, ['GET', 'netRemote.nav.status', 0, \&SIRD_ParseGeneral]);
-    unshift(@SIRD_queue, ['GET', 'netRemote.nav.caps', 0, \&SIRD_ParseGeneral]);
+    unshift(@SIRD_queue, ['GET', 'netRemote.sys.caps.volumeSteps', 0, \&SIRD_ParseGeneral]);
     unshift(@SIRD_queue, ['GET', 'netRemote.nav.numItems', 0, \&SIRD_ParseGeneral]);
 
     # run dequeue
@@ -647,14 +930,15 @@ sub SIRD_Update($)
     unshift(@SIRD_queue, ['GET', 'netRemote.nav.depth', 0, \&SIRD_ParseGeneral]);
     unshift(@SIRD_queue, ['GET', 'netRemote.sys.info.version', 0, \&SIRD_ParseGeneral]);
     unshift(@SIRD_queue, ['GET', 'netRemote.sys.info.friendlyName', 0, \&SIRD_ParseGeneral]);
+    unshift(@SIRD_queue, ['GET', 'netRemote.sys.audio.volume', 0, \&SIRD_ParseGeneral]);
   }
   else
   {
     SIRD_SendRequest($hash, 'GET_MULTIPLE', 'node=netRemote.nav.state&'.
                                             'node=netRemote.nav.status&'.
-                                            'node=netRemote.nav.caps&'.
+                                            'node=netRemote.sys.audio.volume&'.
                                             'node=netRemote.nav.numItems&'.
-                                            'node=netRemote.nav.depth&'.
+                                            'node=netRemote.sys.caps.volumeSteps&'.
                                             'node=netRemote.sys.info.version&'.
                                             'node=netRemote.sys.info.friendlyName&', 0, \&SIRD_ParseMultiple);
   }
@@ -688,8 +972,6 @@ sub SIRD_Update($)
       unshift(@SIRD_queue, ['GET', 'netRemote.play.position', 0, \&SIRD_ParseGeneral]);
       unshift(@SIRD_queue, ['GET', 'netRemote.play.repeat', 0, \&SIRD_ParseGeneral]);
       unshift(@SIRD_queue, ['GET', 'netRemote.play.shuffle', 0, \&SIRD_ParseGeneral]);
-      unshift(@SIRD_queue, ['GET', 'netRemote.sys.caps.volumeSteps', 0, \&SIRD_ParseGeneral]);
-      unshift(@SIRD_queue, ['GET', 'netRemote.sys.audio.volume', 0, \&SIRD_ParseGeneral]);
       unshift(@SIRD_queue, ['GET', 'netRemote.sys.audio.mute', 0, \&SIRD_ParseGeneral]);
     }
     else
@@ -712,8 +994,6 @@ sub SIRD_Update($)
                                               'node=netRemote.play.position&'.
                                               'node=netRemote.play.repeat&'.
                                               'node=netRemote.play.shuffle&'.
-                                              'node=netRemote.sys.caps.volumeSteps&'.
-                                              'node=netRemote.sys.audio.volume&'.
                                               'node=netRemote.sys.audio.mute&', 0, \&SIRD_ParseMultiple);
 
       #SIRD_SendRequest($hash, 'GET_MULTIPLE', 'node=netRemote.multiroom.group.name&'.
@@ -764,8 +1044,8 @@ sub SIRD_ClearReadings($)
   readingsBulkUpdateIfChanged($hash, 'position', '');
   readingsBulkUpdateIfChanged($hash, 'repeat', '');
   readingsBulkUpdateIfChanged($hash, 'shuffle', '');
-  readingsBulkUpdateIfChanged($hash, 'volume', '');
-  readingsBulkUpdateIfChanged($hash, 'volumeStraight', '');
+  #readingsBulkUpdateIfChanged($hash, 'volume', '');
+  #readingsBulkUpdateIfChanged($hash, 'volumeStraight', '');
   readingsBulkUpdateIfChanged($hash, 'mute', '');
   readingsBulkUpdateIfChanged($hash, 'input', '');
 }
@@ -1680,6 +1960,7 @@ sub SIRD_ParseNavigation($$$)
     <li>shuffle - on/off</li>
     <li>repeat - on/off</li>
     <li>statusRequest - update all readings</li>
+    <li>speak - text to speech for up to 100 chars</li>
     <br>
   </ul>
   <br><br>
@@ -1700,6 +1981,9 @@ sub SIRD_ParseNavigation($$$)
     <li><b>playCommands:</b> can be used to define the mapping of play commands (default: 0:stop,1:play,2:pause,3:next,4:previous)<br></li>
     <li><b>compatibilityMode:</b> This mode is activated by default and should work for all radios. It is highly recommended to disable the compatibility mode if possible because it needs a lot of ressources.<br></li>
     <li><b>maxNavigationItems:</b> maximum number of navigation items to get by each ls command (default: 100)<br></li>
+    <li><b>ttsInput:</b> input for text to speech (default: dmr)<br></li>
+    <li><b>ttsLanguage:</b> language setting for text to speech output (default: de)<br></li>
+    <li><b>ttsVolume:</b> volume setting for text to speech output (default: 25)<br></li>
     <br>
   </ul>
 </ul>
