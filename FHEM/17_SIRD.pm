@@ -42,6 +42,7 @@ sub SIRD_Initialize($)
                       'ttsInput '.
                       'ttsLanguage '.
                       'ttsVolume '.
+                      'ttsWaitPowerOn '.
                       $readingFnAttributes;
 
   return undef;
@@ -64,7 +65,7 @@ sub SIRD_Define($$)
   $hash->{IP} = $ip;
   $hash->{PIN} = $pin;
   $hash->{INTERVAL} = $interval;
-  $hash->{VERSION} = '1.1.0';
+  $hash->{VERSION} = '1.1.1';
 
   $hash->{helper}{suspendUpdate} = 0;
 
@@ -165,6 +166,13 @@ sub SIRD_Attr($$$$) {
       if (($value !~ /^\d+$/) || ($value < 1))
       {
         return 'maxNavigationItems must be a number greater than 0';
+      }
+    }
+    elsif ('ttsWaitPowerOn' eq $attribute)
+    {
+      if (($value !~ /^\d+$/) || ($value < 0))
+      {
+        return 'ttsWaitPowerOn must be a number greater or equal 0 (seconds)';
       }
     }
   }
@@ -280,6 +288,8 @@ sub SIRD_Set($$@) {
     {
       $ttsInput = '';
     }
+
+    $input = $1 if ($inputReading =~ /(\d+):$input/);
 
     SIRD_StartSpeak($hash, $text, $input, $ttsInput, $volumeSteps, $hash->{CL});
 
@@ -661,9 +671,11 @@ sub SIRD_StartSpeak($$$$$;$)
   my $ip = InternalVal($name, 'IP', undef);
   my $pin = InternalVal($name, 'PIN', '1234');
   my $language = AttrVal($name, 'ttsLanguage', 'de');
+  my $ttsWaitPowerOn = AttrVal($name, 'ttsWaitPowerOn', 0);
   my $power = ReadingsVal($name, 'power', 'on');
   my $ttsVolume = AttrVal($name, 'ttsVolume', 25);
   my $volume = ReadingsVal($name, 'volume', 25);
+  my $volumeStraight = ReadingsVal($name, 'volumeStraight', int($volume / (100 / $volumeSteps)));
 
   if (exists($hash->{helper}{RUNNING_PID1}))
   {
@@ -680,14 +692,14 @@ sub SIRD_StartSpeak($$$$$;$)
   $hash->{helper}{CL} = (defined($cl) ? $cl : $hash->{CL});
   $hash->{helper}{suspendUpdate} = 1;
   @SIRD_queue = ();
-  $hash->{helper}{RUNNING_PID1} = BlockingCall('SIRD_DoSpeak', $name.'|'.$ip.'|'.$pin.'|'.$text.'|'.$language.'|'.$input.'|'.$ttsInput.'|'.$volume.'|'.$ttsVolume.'|'.$volumeSteps.'|'.$power, 'SIRD_EndSpeak', 120, 'SIRD_AbortSpeak', $hash);
+  $hash->{helper}{RUNNING_PID1} = BlockingCall('SIRD_DoSpeak', $name.'|'.$ip.'|'.$pin.'|'.$text.'|'.$language.'|'.$input.'|'.$ttsInput.'|'.$volume.'|'.$ttsVolume.'|'.$volumeStraight.'|'.$volumeSteps.'|'.$power.'|'.$ttsWaitPowerOn, 'SIRD_EndSpeak', 120, 'SIRD_AbortSpeak', $hash);
 }
 
 
 sub SIRD_DoSpeak(@)
 {
   my ($string) = @_;
-  my ($name, $ip, $pin, $text, $language, $input, $ttsInput, $volume, $ttsVolume, $volumeSteps, $power) = split("\\|", $string);
+  my ($name, $ip, $pin, $text, $language, $input, $ttsInput, $volume, $ttsVolume, $volumeStraight, $volumeSteps, $power, $ttsWaitPowerOn) = split("\\|", $string);
   my $param;
   my $err;
   my $data;
@@ -708,6 +720,8 @@ sub SIRD_DoSpeak(@)
     Log3 $name, 5, $name.': start power on.';
 
     GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.power?pin='.$pin.'&value=1', 5, '', 1, 5);
+
+    sleep($ttsWaitPowerOn) if ($ttsWaitPowerOn > 0);
   }
 
   if ('' ne $ttsInput)
@@ -859,7 +873,7 @@ sub SIRD_DoSpeak(@)
 
   if ($volume != $ttsVolume)
   {
-    GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.audio.volume?pin='.$pin.'&value='.int($volume / (100 / $volumeSteps)), 5, '', 1, 5);
+    GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.audio.volume?pin='.$pin.'&value='.int($volumeStraight), 5, '', 1, 5);
 
     sleep(2);
   }
@@ -927,7 +941,7 @@ sub SIRD_Update($)
     # run dequeue
     SIRD_DeQueue($name);
 
-    unshift(@SIRD_queue, ['GET', 'netRemote.nav.depth', 0, \&SIRD_ParseGeneral]);
+    unshift(@SIRD_queue, ['GET', 'netRemote.sys.mode', 0, \&SIRD_ParseGeneral]);
     unshift(@SIRD_queue, ['GET', 'netRemote.sys.info.version', 0, \&SIRD_ParseGeneral]);
     unshift(@SIRD_queue, ['GET', 'netRemote.sys.info.friendlyName', 0, \&SIRD_ParseGeneral]);
     unshift(@SIRD_queue, ['GET', 'netRemote.sys.audio.volume', 0, \&SIRD_ParseGeneral]);
@@ -965,7 +979,7 @@ sub SIRD_Update($)
       unshift(@SIRD_queue, ['GET', 'netRemote.play.info.graphicUri', 0, \&SIRD_ParseGeneral]);
       unshift(@SIRD_queue, ['GET', 'netRemote.play.info.text', 0, \&SIRD_ParseGeneral]);
       unshift(@SIRD_queue, ['GET', 'netRemote.nav.numItems', 0, \&SIRD_ParseGeneral]);
-      unshift(@SIRD_queue, ['GET', 'netRemote.sys.mode', 0, \&SIRD_ParseGeneral]);
+      unshift(@SIRD_queue, ['GET', 'netRemote.nav.depth', 0, \&SIRD_ParseGeneral]);
       unshift(@SIRD_queue, ['GET', 'netRemote.play.status', 0, \&SIRD_ParseGeneral]);
       unshift(@SIRD_queue, ['GET', 'netRemote.play.caps', 0, \&SIRD_ParseGeneral]);
       unshift(@SIRD_queue, ['GET', 'netRemote.play.errorStr', 0, \&SIRD_ParseGeneral]);
@@ -1044,10 +1058,8 @@ sub SIRD_ClearReadings($)
   readingsBulkUpdateIfChanged($hash, 'position', '');
   readingsBulkUpdateIfChanged($hash, 'repeat', '');
   readingsBulkUpdateIfChanged($hash, 'shuffle', '');
-  #readingsBulkUpdateIfChanged($hash, 'volume', '');
-  #readingsBulkUpdateIfChanged($hash, 'volumeStraight', '');
   readingsBulkUpdateIfChanged($hash, 'mute', '');
-  readingsBulkUpdateIfChanged($hash, 'input', '');
+  #readingsBulkUpdateIfChanged($hash, 'input', '');
 }
 
 
@@ -1984,6 +1996,7 @@ sub SIRD_ParseNavigation($$$)
     <li><b>ttsInput:</b> input for text to speech (default: dmr)<br></li>
     <li><b>ttsLanguage:</b> language setting for text to speech output (default: de)<br></li>
     <li><b>ttsVolume:</b> volume setting for text to speech output (default: 25)<br></li>
+    <li><b>ttsWaitPowerOn:</b> wait time after power on but before tts output is started (default: 0)<br></li>
     <br>
   </ul>
 </ul>
