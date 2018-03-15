@@ -1,2 +1,5 @@
- - attribute ttsWaitPowerOn added
- - volume/input switch after tts output fixed
+ - tts output routine restructured a little bit
+ - separate preset commands for different outputs
+ - attribute ttsWaitPowerOn removed
+ - attribute ttsWaitTimes added
+ - version increased from 1.1.1 to 1.1.2

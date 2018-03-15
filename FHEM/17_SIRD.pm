@@ -42,7 +42,7 @@ sub SIRD_Initialize($)
                       'ttsInput '.
                       'ttsLanguage '.
                       'ttsVolume '.
-                      'ttsWaitPowerOn '.
+                      'ttsWaitTimes '.
                       $readingFnAttributes;
 
   return undef;
@@ -65,7 +65,7 @@ sub SIRD_Define($$)
   $hash->{IP} = $ip;
   $hash->{PIN} = $pin;
   $hash->{INTERVAL} = $interval;
-  $hash->{VERSION} = '1.1.1';
+  $hash->{VERSION} = '1.1.2';
 
   $hash->{helper}{suspendUpdate} = 0;
 
@@ -168,11 +168,12 @@ sub SIRD_Attr($$$$) {
         return 'maxNavigationItems must be a number greater than 0';
       }
     }
-    elsif ('ttsWaitPowerOn' eq $attribute)
+    elsif ('ttsWaitTimes' eq $attribute)
     {
-      if (($value !~ /^\d+$/) || ($value < 0))
+      if (($value !~ /^(\d):(\d):(\d):(\d):(\d):(\d)$/) ||
+          ($1 < 0) || ($2 < 0) || ($3 < 0) || ($4 < 0) || ($5 < 0) || ($6 < 0))
       {
-        return 'ttsWaitPowerOn must be a number greater or equal 0 (seconds)';
+        return 'ttsWaitTimes must be 6 numbers equal or greater than 0 joint by : (default: 0:2:0:2:0:0)';
       }
     }
   }
@@ -186,9 +187,10 @@ sub SIRD_Set($$@) {
   my ($cmd, @args) = @aa;
   my $arg = $args[0];
   my $inputs = 'noArg';
-  my $presets = 'noArg';
+  my $presets = '';
+  my $presetsAll = '';
+  my $input = ReadingsVal($name, 'input', '');
   my $inputReading = ReadingsVal($name, '.inputs', undef);
-  my $presetReading = ReadingsVal($name, '.presets', undef);
   my $volumeSteps = ReadingsVal($name, '.volumeSteps', 20);
 
   if (defined($inputReading))
@@ -197,19 +199,25 @@ sub SIRD_Set($$@) {
 
     while ($inputReading =~ /\d+:([^,]+),?/g)
     {
+      my $inp = $1;
+      my $presetReading = ReadingsVal($name, '.'.$inp.'presets', undef);
+
       $inputs .= ',' if ('' ne $inputs);
-      $inputs .= $1;
-    }
-  }
+      $inputs .= $inp;
 
-  if (defined($presetReading))
-  {
-    $presets = '';
+      if (defined($presetReading))
+      {
+        $presets = '';
 
-    while ($presetReading =~ /\d+:([^,]+),?/g)
-    {
-      $presets .= ',' if ('' ne $presets);
-      $presets .= $1;
+        while ($presetReading =~ /\d+:([^,]+),?/g)
+        {
+          $presets .= ',' if ('' ne $presets);
+          $presets .= $1;
+        }
+
+        $presetsAll .= ' ' if ('' ne $presetsAll);
+        $presetsAll .= $inp.'preset:'.$presets;
+      }
     }
   }
 
@@ -237,9 +245,11 @@ sub SIRD_Set($$@) {
       SIRD_SendRequest($hash, 'SET', 'netRemote.sys.mode', $1, \&SIRD_ParseInputs);
     }
   }
-  elsif ('preset' eq $cmd)
+  elsif ($cmd =~ /preset$/)
   {
-    if (defined($arg) && ($presetReading =~ /(\d+):$arg/))
+    my $presetReading = ReadingsVal($name, '.'.$cmd.'s', undef);
+
+    if (defined($arg) && defined($presetReading) && ($presetReading =~ /(\d+):$arg/))
     {
       SIRD_SendRequest($hash, 'SET', 'netRemote.nav.action.selectPreset', $1, \&SIRD_ParsePresets);
     }
@@ -272,11 +282,10 @@ sub SIRD_Set($$@) {
   {
     my $text = '';
     my $ttsInput = AttrVal($name, 'ttsInput', 'dmr');
-    my $input = ReadingsVal($name, 'input', undef);
 
     eval { $text = encode_base64(join(' ', @args)) };
 
-    if (defined($input) && ($ttsInput eq $input))
+    if (('' ne $input) && ($ttsInput eq $input))
     {
       $ttsInput = '';
     }
@@ -308,7 +317,7 @@ sub SIRD_Set($$@) {
   {
     my $list = 'login:noArg on:noArg off:noArg mute:on,off,toggle shuffle:on,off repeat:on,off stop:noArg play:noArg pause:noArg next:noArg previous:noArg '.
                'on-for-timer off-for-timer on-till off-till on-till-overnight off-till-overnight intervals toggle:noArg speak '.
-               'volume:slider,0,1,100 volumeStraight:slider,0,1,'.$volumeSteps.' statusRequest:noArg input:'.$inputs.' preset:'.$presets;
+               'volume:slider,0,1,100 volumeStraight:slider,0,1,'.$volumeSteps.' statusRequest:noArg input:'.$inputs.' '.$presetsAll;
 
     return 'Unknown argument '.$cmd.', choose one of '.$list;
   }
@@ -671,7 +680,8 @@ sub SIRD_StartSpeak($$$$$;$)
   my $ip = InternalVal($name, 'IP', undef);
   my $pin = InternalVal($name, 'PIN', '1234');
   my $language = AttrVal($name, 'ttsLanguage', 'de');
-  my $ttsWaitPowerOn = AttrVal($name, 'ttsWaitPowerOn', 0);
+  # PowerOn,LoadStream,SetVolumeTTS,SetVolumeNormal,SetInput,PowerOff
+  my $ttsWaitTimes = AttrVal($name, 'ttsWaitTimes', '0:2:0:2:0:0');
   my $power = ReadingsVal($name, 'power', 'on');
   my $ttsVolume = AttrVal($name, 'ttsVolume', 25);
   my $volume = ReadingsVal($name, 'volume', 25);
@@ -692,14 +702,15 @@ sub SIRD_StartSpeak($$$$$;$)
   $hash->{helper}{CL} = (defined($cl) ? $cl : $hash->{CL});
   $hash->{helper}{suspendUpdate} = 1;
   @SIRD_queue = ();
-  $hash->{helper}{RUNNING_PID1} = BlockingCall('SIRD_DoSpeak', $name.'|'.$ip.'|'.$pin.'|'.$text.'|'.$language.'|'.$input.'|'.$ttsInput.'|'.$volume.'|'.$ttsVolume.'|'.$volumeStraight.'|'.$volumeSteps.'|'.$power.'|'.$ttsWaitPowerOn, 'SIRD_EndSpeak', 120, 'SIRD_AbortSpeak', $hash);
+  $hash->{helper}{RUNNING_PID1} = BlockingCall('SIRD_DoSpeak', $name.'|'.$ip.'|'.$pin.'|'.$text.'|'.$language.'|'.$input.'|'.$ttsInput.'|'.$volume.'|'.$ttsVolume.'|'.$volumeStraight.'|'.$volumeSteps.'|'.$power.'|'.$ttsWaitTimes, 'SIRD_EndSpeak', 120, 'SIRD_AbortSpeak', $hash);
 }
 
 
 sub SIRD_DoSpeak(@)
 {
   my ($string) = @_;
-  my ($name, $ip, $pin, $text, $language, $input, $ttsInput, $volume, $ttsVolume, $volumeStraight, $volumeSteps, $power, $ttsWaitPowerOn) = split("\\|", $string);
+  my ($name, $ip, $pin, $text, $language, $input, $ttsInput, $volume, $ttsVolume, $volumeStraight, $volumeSteps, $power, $ttsWaitTimes) = split("\\|", $string);
+  my ($ttsWait1, $ttsWait2, $ttsWait3, $ttsWait4, $ttsWait5, $ttsWait6) = split("\\:", $ttsWaitTimes);
   my $param;
   my $err;
   my $data;
@@ -715,20 +726,18 @@ sub SIRD_DoSpeak(@)
 
   Log3 $name, 5, $name.': Blocking call running to speak.';
 
-  if ('off' eq $power)
-  {
-    Log3 $name, 5, $name.': start power on.';
-
-    GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.power?pin='.$pin.'&value=1', 5, '', 1, 5);
-
-    sleep($ttsWaitPowerOn) if ($ttsWaitPowerOn > 0);
-  }
-
   if ('' ne $ttsInput)
   {
     Log3 $name, 5, $name.': start switch to dmr.';
 
     $data = GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.mode?pin='.$pin.'&value='.$ttsInput, 5, '', 1, 5);
+  }
+
+  if ('off' eq $power)
+  {
+    Log3 $name, 5, $name.': start power on.';
+
+    GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.power?pin='.$pin.'&value=1', 5, '', 1, 5);
     if ($data && ($data =~ /fsapiResponse/))
     {
       eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => []);};
@@ -739,27 +748,28 @@ sub SIRD_DoSpeak(@)
 
         do
         {
-          $data = GetFileFromURL('http://'.$ip.':80/fsapi/GET/netRemote.sys.mode?pin='.$pin, 5, '', 1, 5);
+          $data = GetFileFromURL('http://'.$ip.':80/fsapi/GET/netRemote.sys.power?pin='.$pin, 5, '', 1, 5);
           if ($data && ($data =~ /fsapiResponse/))
           {
             eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => []);};
 
             if (!$@ && ('FS_OK' eq $xml->{status}))
             {
-              if ($xml->{value}->{u32} == $ttsInput)
+              if (1 == $xml->{value}->{u8})
               {
-                Log3 $name, 5, $name.': switch to dmr successfully completed. ('.$retryCounter.')';
+                Log3 $name, 5, $name.': power on successfully completed. ('.$retryCounter.')';
 
                 $retryCounter = 10;
               }
             }
           }
 
-          #sleep(1);
           $retryCounter++;
         } while ($retryCounter < 10);
       }
     }
+
+    sleep($ttsWait1) if ($ttsWait1 > 0);
   }
 
   $param = {
@@ -814,11 +824,13 @@ sub SIRD_DoSpeak(@)
     Log3 $name, 5, $name.': '.Dumper($data);
   }
 
-  sleep(2);
+  sleep($ttsWait2) if ($ttsWait2 > 0);
 
   if ($volume != $ttsVolume)
   {
     GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.audio.volume?pin='.$pin.'&value='.int($ttsVolume / (100 / $volumeSteps)), 5, '', 1, 5);
+
+    sleep($ttsWait3) if ($ttsWait3 > 0);
   }
 
   $param = {
@@ -875,17 +887,21 @@ sub SIRD_DoSpeak(@)
   {
     GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.audio.volume?pin='.$pin.'&value='.int($volumeStraight), 5, '', 1, 5);
 
-    sleep(2);
+    sleep($ttsWait4) if ($ttsWait4 > 0);
   }
 
   if ('' ne $ttsInput)
   {
     GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.mode?pin='.$pin.'&value='.$input, 5, '', 1, 5);
+
+    sleep($ttsWait5) if ($ttsWait5 > 0);
   }
 
   if ('off' eq $power)
   {
     GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.power?pin='.$pin.'&value=0', 5, '', 1, 5);
+
+    sleep($ttsWait6) if ($ttsWait6 > 0);
   }
 
   return $name;
@@ -1792,7 +1808,8 @@ sub SIRD_ParsePresets($$$)
     {
       if ('SET' eq $param->{cmd})
       {
-        my $presetReading = ReadingsVal($name, '.presets', '');
+        my $input = ReadingsVal($name, 'input', '');
+        my $presetReading = ReadingsVal($name, '.'.$input.'presets', '');
 
         if ($presetReading =~ /$param->{value}:(.*?)(?:,|$)/)
         {
@@ -1802,6 +1819,7 @@ sub SIRD_ParsePresets($$$)
       else
       {
         my $presets = '';
+        my $input = ReadingsVal($name, 'input', '');
 
         Log3 $name, 5, $name.': Presets '.$param->{cmd}.' successful.';
 
@@ -1819,6 +1837,7 @@ sub SIRD_ParsePresets($$$)
 
         $presets =~ s/\s//g;
 
+        readingsSingleUpdate($hash, '.'.$input.'presets', encode_utf8($presets), 1);
         readingsSingleUpdate($hash, '.presets', encode_utf8($presets), 1);
       }
     }
@@ -1826,8 +1845,10 @@ sub SIRD_ParsePresets($$$)
     {
       if ('LIST_GET_NEXT' eq $param->{cmd})
       {
+        my $input = ReadingsVal($name, 'input', '');
+
         readingsSingleUpdate($hash, 'preset', '', 1);
-        readingsSingleUpdate($hash, '.presets', '', 1);
+        readingsSingleUpdate($hash, '.'.$input.'presets', '', 1);
       }
     }
   }
@@ -1965,7 +1986,7 @@ sub SIRD_ParseNavigation($$$)
     <li>next - switch to next titel/station</li>
     <li>previous - switch to previous titel/station</li>
     <li>input - switch to another input</li>
-    <li>preset - switch to another preset</li>
+    <li>&lt;input&gt;preset - switch to another preset</li>
     <li>volume - set a new volume 0 - 100</li>
     <li>volumeStraight - set a device specific volume 0 - X</li>
     <li>mute - on/off/toggle</li>
@@ -1996,7 +2017,7 @@ sub SIRD_ParseNavigation($$$)
     <li><b>ttsInput:</b> input for text to speech (default: dmr)<br></li>
     <li><b>ttsLanguage:</b> language setting for text to speech output (default: de)<br></li>
     <li><b>ttsVolume:</b> volume setting for text to speech output (default: 25)<br></li>
-    <li><b>ttsWaitPowerOn:</b> wait time after power on but before tts output is started (default: 0)<br></li>
+    <li><b>ttsWaitTimes:</b> wait times for tts output (default: 0:2:0:2:0:0 = PowerOn:LoadStream:SetVolumeTTS:SetVolumeNormal:SetInput:PowerOff)<br></li>
     <br>
   </ul>
 </ul>
