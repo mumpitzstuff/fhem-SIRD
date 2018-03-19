@@ -65,7 +65,7 @@ sub SIRD_Define($$)
   $hash->{IP} = $ip;
   $hash->{PIN} = $pin;
   $hash->{INTERVAL} = $interval;
-  $hash->{VERSION} = '1.1.2';
+  $hash->{VERSION} = '1.1.3';
 
   $hash->{helper}{suspendUpdate} = 0;
 
@@ -254,6 +254,24 @@ sub SIRD_Set($$@) {
       SIRD_SendRequest($hash, 'SET', 'netRemote.nav.action.selectPreset', $1, \&SIRD_ParsePresets);
     }
   }
+  elsif ('presetUp' eq $cmd)
+  {
+    my $lastPreset = ReadingsVal($name, '.lastPreset', undef);
+
+    if (defined($lastPreset) && ($lastPreset < 6))
+    {
+      SIRD_SendRequest($hash, 'SET', 'netRemote.nav.action.selectPreset', $lastPreset + 1, \&SIRD_ParsePresets);
+    }
+  }
+  elsif ('presetDown' eq $cmd)
+  {
+    my $lastPreset = ReadingsVal($name, '.lastPreset', undef);
+
+    if (defined($lastPreset) && ($lastPreset > 0))
+    {
+      SIRD_SendRequest($hash, 'SET', 'netRemote.nav.action.selectPreset', $lastPreset - 1, \&SIRD_ParsePresets);
+    }
+  }
   elsif ('volume' eq $cmd)
   {
     SIRD_SendRequest($hash, 'SET', 'netRemote.sys.audio.volume', int($arg / (100 / $volumeSteps)), \&SIRD_ParseVolume);
@@ -261,6 +279,24 @@ sub SIRD_Set($$@) {
   elsif ('volumeStraight' eq $cmd)
   {
     SIRD_SendRequest($hash, 'SET', 'netRemote.sys.audio.volume', int($arg), \&SIRD_ParseVolume);
+  }
+  elsif ('volumeUp' eq $cmd)
+  {
+    my $volumeStraight = ReadingsVal($name, 'volumeStraight', undef);
+
+    if (defined($volumeStraight) && ($volumeStraight < $volumeSteps))
+    {
+      SIRD_SendRequest($hash, 'SET', 'netRemote.sys.audio.volume', int($volumeStraight + 1), \&SIRD_ParseVolume);
+    }
+  }
+  elsif ('volumeDown' eq $cmd)
+  {
+    my $volumeStraight = ReadingsVal($name, 'volumeStraight', undef);
+
+    if (defined($volumeStraight) && ($volumeStraight > 0))
+    {
+      SIRD_SendRequest($hash, 'SET', 'netRemote.sys.audio.volume', int($volumeStraight - 1), \&SIRD_ParseVolume);
+    }
   }
   elsif ('mute' eq $cmd)
   {
@@ -315,7 +351,8 @@ sub SIRD_Set($$@) {
   }
   else
   {
-    my $list = 'login:noArg on:noArg off:noArg mute:on,off,toggle shuffle:on,off repeat:on,off stop:noArg play:noArg pause:noArg next:noArg previous:noArg '.
+    my $list = 'login:noArg on:noArg off:noArg mute:on,off,toggle shuffle:on,off repeat:on,off stop:noArg play:noArg pause:noArg '.
+               'next:noArg previous:noArg presetUp:noArg presetDown:noArg volumeUp:noArg volumeDown:noArg '.
                'on-for-timer off-for-timer on-till off-till on-till-overnight off-till-overnight intervals toggle:noArg speak '.
                'volume:slider,0,1,100 volumeStraight:slider,0,1,'.$volumeSteps.' statusRequest:noArg input:'.$inputs.' '.$presetsAll;
 
@@ -1815,6 +1852,8 @@ sub SIRD_ParsePresets($$$)
         {
           readingsSingleUpdate($hash, 'preset', $1, 1);
         }
+
+        readingsSingleUpdate($hash, '.lastPreset', $param->{value}, 1);
       }
       else
       {
@@ -1987,8 +2026,12 @@ sub SIRD_ParseNavigation($$$)
     <li>previous - switch to previous titel/station</li>
     <li>input - switch to another input</li>
     <li>&lt;input&gt;preset - switch to another preset</li>
+    <li>presetUp - switch to the next preset</li>
+    <li>presetDown - switch to the previous preset</li>
     <li>volume - set a new volume 0 - 100</li>
     <li>volumeStraight - set a device specific volume 0 - X</li>
+    <li>volumeUp - increase the volume by 1</li>
+    <li>volumeDown - decrease the volume by 1</li>
     <li>mute - on/off/toggle</li>
     <li>shuffle - on/off</li>
     <li>repeat - on/off</li>
