@@ -43,6 +43,8 @@ sub SIRD_Initialize($)
                       'ttsLanguage '.
                       'ttsVolume '.
                       'ttsWaitTimes '.
+                      'updateAfterSet:0,1 '.
+                      'notifications:0,1 '.
                       $readingFnAttributes;
 
   return undef;
@@ -57,17 +59,21 @@ sub SIRD_Define($$)
   return 'Usage: define <name> SIRD <ip> <pin> <interval>'  if (@args < 4);
 
   my ($name, $type, $ip, $pin, $interval) = @args;
+
   return 'Please enter a valid ip address ('.$ip.').' if ($ip !~ /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/);
   return 'Please enter a valid pin (4 digits).' if ($pin !~ /^\d\d\d\d$/);
-  return 'The update interval must be a number and has to be at least 10s.' if (($interval !~ /^\d+$/) || ($interval < 10));
+  return 'The update interval must be a number and has to be at least 5s if compatibility mode is disabled and '.
+         '10s if enabled (the interval will be set to 10s automatically if compatibility mode is enabled).' if (($interval !~ /^\d+$/) || ($interval < 5));
 
   $hash->{NOTIFYDEV} = 'global';
   $hash->{IP} = $ip;
   $hash->{PIN} = $pin;
   $hash->{INTERVAL} = $interval;
-  $hash->{VERSION} = '1.1.3';
+  $hash->{VERSION} = '1.1.4';
 
-  $hash->{helper}{suspendUpdate} = 0;
+  delete($hash->{helper}{suspendUpdate});
+  delete($hash->{helper}{notifications});
+  delete($hash->{helper}{sid});
 
   readingsSingleUpdate($hash, 'state', 'Initialized', 1);
 
@@ -81,11 +87,15 @@ sub SIRD_Undefine($$)
 {
   my ($hash, $arg) = @_;
 
+  delete($hash->{helper}{suspendUpdate});
+  delete($hash->{helper}{notifications});
+  delete($hash->{helper}{sid});
+
   RemoveInternalTimer($hash);
   SetExtensionsCancel($hash);
-  HttpUtils_Close($hash);
   SIRD_AbortNavigation($hash);
   SIRD_AbortSpeak($hash);
+  HttpUtils_Close($hash);
 
   return undef;
 }
@@ -176,6 +186,17 @@ sub SIRD_Attr($$$$) {
         return 'ttsWaitTimes must be 6 numbers equal or greater than 0 joint by : (default: 0:2:0:2:0:0)';
       }
     }
+    elsif ('compatibilityMode' eq $attribute)
+    {
+      if ((0 != $value) && ($hash->{INTERVAL} < 10))
+      {
+        return 'increase the update interval before switching to the compatibility mode (interval must be at least 10s)';
+      }
+    }
+    elsif ('notifications' eq $attribute)
+    {
+      delete($hash->{helper}{notifications});
+    }
   }
 
   return undef;
@@ -192,6 +213,7 @@ sub SIRD_Set($$@) {
   my $input = ReadingsVal($name, 'input', '');
   my $inputReading = ReadingsVal($name, '.inputs', undef);
   my $volumeSteps = ReadingsVal($name, '.volumeSteps', 20);
+  my $updateAfterSet = AttrVal($name, 'updateAfterSet', 1);
 
   if (defined($inputReading))
   {
@@ -223,11 +245,11 @@ sub SIRD_Set($$@) {
 
   if ('login' eq $cmd)
   {
-    SIRD_SendRequest($hash, 'CREATE_SESSION', '', 0, \&SIRD_ParseLogin);
+    SIRD_SendRequest($hash, 'CREATE_SESSION', '', 0, 0, \&SIRD_ParseLogin);
   }
   elsif ($cmd =~ /^(?:on|off)$/)
   {
-    SIRD_SendRequest($hash, 'SET', 'netRemote.sys.power', ('on' eq $cmd ? 1 : 0), \&SIRD_ParsePower);
+    SIRD_SendRequest($hash, 'SET', 'netRemote.sys.power', ('on' eq $cmd ? 1 : 0), 0, \&SIRD_ParsePower);
   }
   elsif ($cmd =~ /^(?:stop|play|pause|next|previous)$/)
   {
@@ -235,14 +257,14 @@ sub SIRD_Set($$@) {
 
     if ($playCommands =~ /([0-9])\:$cmd/)
     {
-      SIRD_SendRequest($hash, 'SET', 'netRemote.play.control', $1, \&SIRD_ParsePlay);
+      SIRD_SendRequest($hash, 'SET', 'netRemote.play.control', $1, 0, \&SIRD_ParsePlay);
     }
   }
   elsif ('input' eq $cmd)
   {
     if (defined($arg) && ($inputReading =~ /(\d+):$arg/))
     {
-      SIRD_SendRequest($hash, 'SET', 'netRemote.sys.mode', $1, \&SIRD_ParseInputs);
+      SIRD_SendRequest($hash, 'SET', 'netRemote.sys.mode', $1, 0, \&SIRD_ParseInputs);
     }
   }
   elsif ($cmd =~ /preset$/)
@@ -251,7 +273,7 @@ sub SIRD_Set($$@) {
 
     if (defined($arg) && defined($presetReading) && ($presetReading =~ /(\d+):$arg/))
     {
-      SIRD_SendRequest($hash, 'SET', 'netRemote.nav.action.selectPreset', $1, \&SIRD_ParsePresets);
+      SIRD_SendRequest($hash, 'SET', 'netRemote.nav.action.selectPreset', $1, 0, \&SIRD_ParsePresets);
     }
   }
   elsif ('presetUp' eq $cmd)
@@ -260,7 +282,7 @@ sub SIRD_Set($$@) {
 
     if (defined($lastPreset) && ($lastPreset < 6))
     {
-      SIRD_SendRequest($hash, 'SET', 'netRemote.nav.action.selectPreset', $lastPreset + 1, \&SIRD_ParsePresets);
+      SIRD_SendRequest($hash, 'SET', 'netRemote.nav.action.selectPreset', $lastPreset + 1, 0, \&SIRD_ParsePresets);
     }
   }
   elsif ('presetDown' eq $cmd)
@@ -269,16 +291,16 @@ sub SIRD_Set($$@) {
 
     if (defined($lastPreset) && ($lastPreset > 0))
     {
-      SIRD_SendRequest($hash, 'SET', 'netRemote.nav.action.selectPreset', $lastPreset - 1, \&SIRD_ParsePresets);
+      SIRD_SendRequest($hash, 'SET', 'netRemote.nav.action.selectPreset', $lastPreset - 1, 0, \&SIRD_ParsePresets);
     }
   }
   elsif ('volume' eq $cmd)
   {
-    SIRD_SendRequest($hash, 'SET', 'netRemote.sys.audio.volume', int($arg / (100 / $volumeSteps)), \&SIRD_ParseVolume);
+    SIRD_SendRequest($hash, 'SET', 'netRemote.sys.audio.volume', int($arg / (100 / $volumeSteps)), 0, \&SIRD_ParseVolume);
   }
   elsif ('volumeStraight' eq $cmd)
   {
-    SIRD_SendRequest($hash, 'SET', 'netRemote.sys.audio.volume', int($arg), \&SIRD_ParseVolume);
+    SIRD_SendRequest($hash, 'SET', 'netRemote.sys.audio.volume', int($arg), 0, \&SIRD_ParseVolume);
   }
   elsif ('volumeUp' eq $cmd)
   {
@@ -286,7 +308,7 @@ sub SIRD_Set($$@) {
 
     if (defined($volumeStraight) && ($volumeStraight < $volumeSteps))
     {
-      SIRD_SendRequest($hash, 'SET', 'netRemote.sys.audio.volume', int($volumeStraight + 1), \&SIRD_ParseVolume);
+      SIRD_SendRequest($hash, 'SET', 'netRemote.sys.audio.volume', int($volumeStraight + 1), 0, \&SIRD_ParseVolume);
     }
   }
   elsif ('volumeDown' eq $cmd)
@@ -295,7 +317,7 @@ sub SIRD_Set($$@) {
 
     if (defined($volumeStraight) && ($volumeStraight > 0))
     {
-      SIRD_SendRequest($hash, 'SET', 'netRemote.sys.audio.volume', int($volumeStraight - 1), \&SIRD_ParseVolume);
+      SIRD_SendRequest($hash, 'SET', 'netRemote.sys.audio.volume', int($volumeStraight - 1), 0, \&SIRD_ParseVolume);
     }
   }
   elsif ('mute' eq $cmd)
@@ -304,15 +326,15 @@ sub SIRD_Set($$@) {
     $_ = 0 if ('off' eq $arg);
     $_ = ('on' eq ReadingsVal($name, 'mute', 'off') ? 0 : 1) if ('toggle' eq $arg);
 
-    SIRD_SendRequest($hash, 'SET', 'netRemote.sys.audio.mute', $_, \&SIRD_ParseMute);
+    SIRD_SendRequest($hash, 'SET', 'netRemote.sys.audio.mute', $_, 0, \&SIRD_ParseMute);
   }
   elsif ('shuffle' eq $cmd)
   {
-    SIRD_SendRequest($hash, 'SET', 'netRemote.play.shuffle', ('on' eq $arg ? 1 : 0), \&SIRD_ParseShuffle);
+    SIRD_SendRequest($hash, 'SET', 'netRemote.play.shuffle', ('on' eq $arg ? 1 : 0), 0, \&SIRD_ParseShuffle);
   }
   elsif ('repeat' eq $cmd)
   {
-    SIRD_SendRequest($hash, 'SET', 'netRemote.play.repeat', ('on' eq $arg ? 1 : 0), \&SIRD_ParseRepeat);
+    SIRD_SendRequest($hash, 'SET', 'netRemote.play.repeat', ('on' eq $arg ? 1 : 0), 0, \&SIRD_ParseRepeat);
   }
   elsif ('speak' eq $cmd)
   {
@@ -359,7 +381,7 @@ sub SIRD_Set($$@) {
     return 'Unknown argument '.$cmd.', choose one of '.$list;
   }
 
-  SIRD_Update($hash);
+  SIRD_Update($hash) if (0 != $updateAfterSet);
 
   return undef;
 }
@@ -371,11 +393,11 @@ sub SIRD_Get($$@) {
 
   if ('inputs' eq $cmd)
   {
-    SIRD_SendRequest($hash, 'LIST_GET_NEXT', 'netRemote.sys.caps.validModes/-1', 65536, \&SIRD_ParseInputs);
+    SIRD_SendRequest($hash, 'LIST_GET_NEXT', 'netRemote.sys.caps.validModes/-1', 65536, 0, \&SIRD_ParseInputs);
   }
   elsif ('presets' eq $cmd)
   {
-    SIRD_SendRequest($hash, 'LIST_GET_NEXT', 'netRemote.nav.presets/-1', 20, \&SIRD_ParsePresets);
+    SIRD_SendRequest($hash, 'LIST_GET_NEXT', 'netRemote.nav.presets/-1', 20, 0, \&SIRD_ParsePresets);
   }
   elsif ('ls' eq $cmd)
   {
@@ -400,7 +422,7 @@ sub SIRD_Get($$@) {
       # back?
       if (2 == $type)
       {
-        SIRD_SendRequest($hash, 'SET', 'netRemote.nav.action.navigate', -1, \&SIRD_ParseNavigation, $hash->{CL});
+        SIRD_SendRequest($hash, 'SET', 'netRemote.nav.action.navigate', -1, 0, \&SIRD_ParseNavigation, $hash->{CL});
       }
       # next?
       elsif (3 == $type)
@@ -410,12 +432,12 @@ sub SIRD_Get($$@) {
       # folder?
       elsif (0 == $type)
       {
-        SIRD_SendRequest($hash, 'SET', 'netRemote.nav.action.navigate', $index, \&SIRD_ParseNavigation, $hash->{CL});
+        SIRD_SendRequest($hash, 'SET', 'netRemote.nav.action.navigate', $index, 0, \&SIRD_ParseNavigation, $hash->{CL});
       }
       # entry?
       elsif (1 == $type)
       {
-        SIRD_SendRequest($hash, 'SET', 'netRemote.nav.action.selectItem', $index, \&SIRD_ParseNavigation, $hash->{CL});
+        SIRD_SendRequest($hash, 'SET', 'netRemote.nav.action.selectItem', $index, 0, \&SIRD_ParseNavigation, $hash->{CL});
       }
 
       return undef;
@@ -461,6 +483,8 @@ sub SIRD_SetNextTimer($$)
 {
   my ($hash, $timer) = @_;
   my $name = $hash->{NAME};
+  my $interval = InternalVal($name, 'INTERVAL', 30);
+  my $compatibilityMode = AttrVal($name, 'compatibilityMode', 1);
 
   Log3 $name, 5, $name.': SetNextTimer called';
 
@@ -468,7 +492,9 @@ sub SIRD_SetNextTimer($$)
 
   if (!defined($timer))
   {
-    InternalTimer(gettimeofday() + InternalVal($name, 'INTERVAL', 30), 'SIRD_Update', $hash, 0);
+    $interval = 10 if (($interval < 10) && (0 != $compatibilityMode));
+
+    InternalTimer(gettimeofday() + $interval, 'SIRD_Update', $hash, 0);
   }
   else
   {
@@ -493,7 +519,7 @@ sub SIRD_DeQueue($)
   {
     @_ = @{pop(@SIRD_queue)};
 
-    SIRD_SendRequest($hash, $_[0], $_[1], $_[2], $_[3]);
+    SIRD_SendRequest($hash, $_[0], $_[1], $_[2], 0, $_[3]);
   }
 }
 
@@ -975,6 +1001,7 @@ sub SIRD_Update($)
 {
   my ($hash) = @_;
   my $name = $hash->{NAME};
+  my $notifications = AttrVal($name, 'notifications', 0);
 
   return undef if (IsDisabled($name));
 
@@ -982,7 +1009,24 @@ sub SIRD_Update($)
 
   return undef if ($hash->{helper}{suspendUpdate});
 
-  SIRD_SendRequest($hash, 'GET', 'netRemote.sys.power', 0, \&SIRD_ParsePower);
+  if (0 != $notifications)
+  {
+    if (!exists($hash->{helper}{notifications}))
+    {
+      # start notifications
+      SIRD_SendRequest($hash, 'GET_NOTIFIES', '', 0, 1, \&SIRD_ParseNotifies);
+
+      $hash->{helper}{notifications} = 1;
+
+      Log3 $name, 5, $name.': Notifications started';
+    }
+  }
+  else
+  {
+    delete($hash->{helper}{notifications});
+  }
+
+  SIRD_SendRequest($hash, 'GET', 'netRemote.sys.power', 0, 0, \&SIRD_ParsePower);
 
   if (1 == AttrVal($name, 'compatibilityMode', 1))
   {
@@ -998,47 +1042,48 @@ sub SIRD_Update($)
     unshift(@SIRD_queue, ['GET', 'netRemote.sys.info.version', 0, \&SIRD_ParseGeneral]);
     unshift(@SIRD_queue, ['GET', 'netRemote.sys.info.friendlyName', 0, \&SIRD_ParseGeneral]);
     unshift(@SIRD_queue, ['GET', 'netRemote.sys.audio.volume', 0, \&SIRD_ParseGeneral]);
+    unshift(@SIRD_queue, ['GET', 'netRemote.sys.net.wlan.rssi', 0, \&SIRD_ParseGeneral]);
   }
   else
   {
     SIRD_SendRequest($hash, 'GET_MULTIPLE', 'node=netRemote.nav.state&'.
                                             'node=netRemote.nav.status&'.
-                                            'node=netRemote.sys.audio.volume&'.
-                                            'node=netRemote.nav.numItems&'.
                                             'node=netRemote.sys.caps.volumeSteps&'.
+                                            'node=netRemote.nav.numItems&'.
+                                            'node=netRemote.sys.mode&'.
                                             'node=netRemote.sys.info.version&'.
-                                            'node=netRemote.sys.info.friendlyName&', 0, \&SIRD_ParseMultiple);
+                                            'node=netRemote.sys.info.friendlyName&'.
+                                            'node=netRemote.sys.audio.volume&'.
+                                            'node=netRemote.sys.net.wlan.rssi&', 0, 0, \&SIRD_ParseMultiple);
   }
 
   if (!defined(ReadingsVal($name, '.inputs', undef)) || ('' eq ReadingsVal($name, '.inputs', '')))
   {
-    SIRD_SendRequest($hash, 'LIST_GET_NEXT', 'netRemote.sys.caps.validModes/-1', 65536, \&SIRD_ParseInputs);
+    SIRD_SendRequest($hash, 'LIST_GET_NEXT', 'netRemote.sys.caps.validModes/-1', 65536, 0, \&SIRD_ParseInputs);
   }
-  SIRD_SendRequest($hash, 'LIST_GET_NEXT', 'netRemote.nav.presets/-1', 20, \&SIRD_ParsePresets);
-
-  #SIRD_SendRequest($hash, 'GET_NOTIFIES', '', 0, \&SIRD_ParseNotifies);
+  SIRD_SendRequest($hash, 'LIST_GET_NEXT', 'netRemote.nav.presets/-1', 20, 0, \&SIRD_ParsePresets);
 
   if ('on' eq ReadingsVal($name, 'power', 'unknown'))
   {
     if (1 == AttrVal($name, 'compatibilityMode', 1))
     {
-      unshift(@SIRD_queue, ['GET', 'netRemote.play.info.name', 0, \&SIRD_ParseGeneral]);
       unshift(@SIRD_queue, ['GET', 'netRemote.play.info.description', 0, \&SIRD_ParseGeneral]);
       unshift(@SIRD_queue, ['GET', 'netRemote.play.info.albumDescription', 0, \&SIRD_ParseGeneral]);
       unshift(@SIRD_queue, ['GET', 'netRemote.play.info.artistDescription', 0, \&SIRD_ParseGeneral]);
       unshift(@SIRD_queue, ['GET', 'netRemote.play.info.duration', 0, \&SIRD_ParseGeneral]);
       unshift(@SIRD_queue, ['GET', 'netRemote.play.info.artist', 0, \&SIRD_ParseGeneral]);
       unshift(@SIRD_queue, ['GET', 'netRemote.play.info.album', 0, \&SIRD_ParseGeneral]);
+      unshift(@SIRD_queue, ['GET', 'netRemote.play.info.name', 0, \&SIRD_ParseGeneral]);
       unshift(@SIRD_queue, ['GET', 'netRemote.play.info.graphicUri', 0, \&SIRD_ParseGeneral]);
       unshift(@SIRD_queue, ['GET', 'netRemote.play.info.text', 0, \&SIRD_ParseGeneral]);
       unshift(@SIRD_queue, ['GET', 'netRemote.nav.numItems', 0, \&SIRD_ParseGeneral]);
-      unshift(@SIRD_queue, ['GET', 'netRemote.nav.depth', 0, \&SIRD_ParseGeneral]);
       unshift(@SIRD_queue, ['GET', 'netRemote.play.status', 0, \&SIRD_ParseGeneral]);
-      unshift(@SIRD_queue, ['GET', 'netRemote.play.caps', 0, \&SIRD_ParseGeneral]);
+      unshift(@SIRD_queue, ['GET', 'netRemote.play.frequency', 0, \&SIRD_ParseGeneral]);
       unshift(@SIRD_queue, ['GET', 'netRemote.play.errorStr', 0, \&SIRD_ParseGeneral]);
       unshift(@SIRD_queue, ['GET', 'netRemote.play.position', 0, \&SIRD_ParseGeneral]);
       unshift(@SIRD_queue, ['GET', 'netRemote.play.repeat', 0, \&SIRD_ParseGeneral]);
       unshift(@SIRD_queue, ['GET', 'netRemote.play.shuffle', 0, \&SIRD_ParseGeneral]);
+      unshift(@SIRD_queue, ['GET', 'netRemote.play.signalStrength', 0, \&SIRD_ParseGeneral]);
       unshift(@SIRD_queue, ['GET', 'netRemote.sys.audio.mute', 0, \&SIRD_ParseGeneral]);
     }
     else
@@ -1052,26 +1097,27 @@ sub SIRD_Update($)
                                               'node=netRemote.play.info.album&'.
                                               'node=netRemote.play.info.graphicUri&'.
                                               'node=netRemote.play.info.text&'.
-                                              'node=netRemote.nav.numItems&', 0, \&SIRD_ParseMultiple);
+                                              'node=netRemote.nav.numItems&', 0, 0, \&SIRD_ParseMultiple);
 
       SIRD_SendRequest($hash, 'GET_MULTIPLE', 'node=netRemote.sys.mode&'.
                                               'node=netRemote.play.status&'.
-                                              'node=netRemote.play.caps&'.
+                                              'node=netRemote.play.frequency&'.
                                               'node=netRemote.play.errorStr&'.
                                               'node=netRemote.play.position&'.
                                               'node=netRemote.play.repeat&'.
                                               'node=netRemote.play.shuffle&'.
-                                              'node=netRemote.sys.audio.mute&', 0, \&SIRD_ParseMultiple);
+                                              'node=netRemote.play.signalStrength&'.
+                                              'node=netRemote.sys.audio.mute&', 0, 0, \&SIRD_ParseMultiple);
 
       #SIRD_SendRequest($hash, 'GET_MULTIPLE', 'node=netRemote.multiroom.group.name&'.
       #                                        'node=netRemote.multiroom.group.id&'.
       #                                        'node=netRemote.multiroom.group.state&'.
       #                                        'node=netRemote.multiroom.device.serverStatus&'.
-      #                                        'node=netRemote.multiroom.caps.maxClients&', 0, \&SIRD_ParseMultiple);
+      #                                        'node=netRemote.multiroom.caps.maxClients&', 0, 0, \&SIRD_ParseMultiple);
 
       #SIRD_SendRequest($hash, 'GET_MULTIPLE', 'node=netRemote.multichannel.system.name&'.
       #                                        'node=netRemote.multichannel.system.id&'.
-      #                                        'node=netRemote.multichannel.system.state&', 0, \&SIRD_ParseMultiple);
+      #                                        'node=netRemote.multichannel.system.state&', 0, 0, \&SIRD_ParseMultiple);
     }
   }
   else
@@ -1112,7 +1158,9 @@ sub SIRD_ClearReadings($)
   readingsBulkUpdateIfChanged($hash, 'repeat', '');
   readingsBulkUpdateIfChanged($hash, 'shuffle', '');
   readingsBulkUpdateIfChanged($hash, 'mute', '');
-  #readingsBulkUpdateIfChanged($hash, 'input', '');
+  readingsBulkUpdateIfChanged($hash, 'preset', '');
+  readingsBulkUpdateIfChanged($hash, 'frequency', '');
+  readingsBulkUpdateIfChanged($hash, 'signalStrength', '');
 }
 
 
@@ -1122,57 +1170,27 @@ sub SIRD_SetReadings($)
   my $name = $hash->{NAME};
   my $reading;
 
-  if ('netRemote.play.info.name' eq $_->{node})
+  if (('netRemote.nav.state' eq $_->{node}) && (0 == $_->{value}->{u8}))
   {
-    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
-
-    readingsBulkUpdateIfChanged($hash, 'currentTitle', $reading);
+    # enable navigation if needed!!!
+    SIRD_SendRequest($hash, 'SET', 'netRemote.nav.state', 1, 0, \&SIRD_ParseNavState);
   }
-  elsif ('netRemote.play.info.description' eq $_->{node})
+  elsif ('netRemote.sys.caps.volumeSteps' eq $_->{node})
   {
-    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
-
-    readingsBulkUpdateIfChanged($hash, 'description', $reading);
+    readingsBulkUpdateIfChanged($hash, '.volumeSteps', ($_->{value}->{u8} > 20 && $_->{value}->{u8} < 99 ? $_->{value}->{u8} - 1 : 20));
   }
-  elsif ('netRemote.play.info.albumDescription' eq $_->{node})
+  elsif ('netRemote.nav.numItems' eq $_->{node})
   {
-    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
-
-    readingsBulkUpdateIfChanged($hash, 'currentAlbumDescription', $reading);
+    readingsBulkUpdateIfChanged($hash, '.numNav', $_->{value}->{s32} - 1);
   }
-  elsif ('netRemote.play.info.artistDescription' eq $_->{node})
+  elsif ('netRemote.sys.mode' eq $_->{node})
   {
-    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
+    my $inputReading = ReadingsVal($name, '.inputs', '');
 
-    readingsBulkUpdateIfChanged($hash, 'currentArtistDescription', $reading);
-  }
-  elsif ('netRemote.play.info.duration' eq $_->{node})
-  {
-    readingsBulkUpdateIfChanged($hash, 'duration', $_->{value}->{u32});
-  }
-  elsif ('netRemote.play.info.artist' eq $_->{node})
-  {
-    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
-
-    readingsBulkUpdateIfChanged($hash, 'currentArtist', $reading);
-  }
-  elsif ('netRemote.play.info.album' eq $_->{node})
-  {
-    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
-
-    readingsBulkUpdateIfChanged($hash, 'currentAlbum', $reading);
-  }
-  elsif ('netRemote.play.info.graphicUri' eq $_->{node})
-  {
-    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
-
-    readingsBulkUpdateIfChanged($hash, 'graphicUri', $reading);
-  }
-  elsif ('netRemote.play.info.text' eq $_->{node})
-  {
-    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
-
-    readingsBulkUpdateIfChanged($hash, 'infoText', $reading);
+    if ($inputReading =~ /$_->{value}->{u32}:(.*?)(?:,|$)/)
+    {
+      readingsBulkUpdateIfChanged($hash, 'input', $1);
+    }
   }
   elsif ('netRemote.sys.info.version' eq $_->{node})
   {
@@ -1186,14 +1204,42 @@ sub SIRD_SetReadings($)
 
     readingsBulkUpdateIfChanged($hash, 'friendlyName', $reading);
   }
-  elsif ('netRemote.sys.mode' eq $_->{node})
+  elsif ('netRemote.sys.audio.volume' eq $_->{node})
   {
-    my $inputReading = ReadingsVal($name, '.inputs', '');
+    my $volumeSteps = ReadingsVal($name, '.volumeSteps', 20);
 
-    if ($inputReading =~ /$_->{value}->{u32}:(.*?)(?:,|$)/)
-    {
-      readingsBulkUpdateIfChanged($hash, 'input', $1);
-    }
+    readingsBulkUpdateIfChanged($hash, 'volume', int($_->{value}->{u8} * (100 / $volumeSteps)));
+    readingsBulkUpdateIfChanged($hash, 'volumeStraight', int($_->{value}->{u8}));
+  }
+  elsif ('netRemote.sys.net.wlan.rssi' eq $_->{node})
+  {
+    readingsBulkUpdateIfChanged($hash, 'rssi', $_->{value}->{u8});
+  }
+  elsif ('netRemote.play.info.name' eq $_->{node})
+  {
+    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
+
+    readingsBulkUpdateIfChanged($hash, 'currentTitle', $reading);
+  }
+  elsif ('netRemote.play.info.duration' eq $_->{node})
+  {
+    readingsBulkUpdateIfChanged($hash, 'duration', $_->{value}->{u32});
+  }
+  elsif ('netRemote.play.signalStrength' eq $_->{node})
+  {
+    readingsBulkUpdateIfChanged($hash, 'signalStrength', $_->{value}->{u8});
+  }
+  elsif ('netRemote.play.info.graphicUri' eq $_->{node})
+  {
+    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
+
+    readingsBulkUpdateIfChanged($hash, 'graphicUri', $reading);
+  }
+  elsif ('netRemote.play.info.text' eq $_->{node})
+  {
+    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
+
+    readingsBulkUpdateIfChanged($hash, 'infoText', $reading);
   }
   elsif ('netRemote.play.status' eq $_->{node})
   {
@@ -1201,12 +1247,6 @@ sub SIRD_SetReadings($)
     $reading = ($_->{value}->{u8} < 7 ? $result[$_->{value}->{u8}] : 'unknown');
 
     readingsBulkUpdateIfChanged($hash, 'playStatus', $reading);
-  }
-  elsif ('netRemote.play.errorStr' eq $_->{node})
-  {
-    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
-
-    readingsBulkUpdateIfChanged($hash, 'errorStr', $reading);
   }
   elsif ('netRemote.play.position' eq $_->{node})
   {
@@ -1228,16 +1268,16 @@ sub SIRD_SetReadings($)
 
     readingsBulkUpdateIfChanged($hash, 'shuffle', $reading);
   }
-  elsif ('netRemote.sys.caps.volumeSteps' eq $_->{node})
+  elsif ('netRemote.play.frequency' eq $_->{node})
   {
-    readingsBulkUpdateIfChanged($hash, '.volumeSteps', ($_->{value}->{u8} > 20 && $_->{value}->{u8} < 99 ? $_->{value}->{u8} - 1 : 20));
-  }
-  elsif ('netRemote.sys.audio.volume' eq $_->{node})
-  {
-    my $volumeSteps = ReadingsVal($name, '.volumeSteps', 20);
-
-    readingsBulkUpdateIfChanged($hash, 'volume', int($_->{value}->{u8} * (100 / $volumeSteps)));
-    readingsBulkUpdateIfChanged($hash, 'volumeStraight', int($_->{value}->{u8}));
+    if ($_->{value}->{u32} < 200000)
+    {
+      readingsBulkUpdateIfChanged($hash, 'frequency', sprintf("%.2f", $_->{value}->{u32} / 1000));
+    }
+    else
+    {
+      readingsBulkUpdateIfChanged($hash, 'frequency', '');
+    }
   }
   elsif ('netRemote.sys.audio.mute' eq $_->{node})
   {
@@ -1245,21 +1285,48 @@ sub SIRD_SetReadings($)
 
     readingsBulkUpdateIfChanged($hash, 'mute', $reading);
   }
-  elsif (('netRemote.nav.state' eq $_->{node}) && (0 == $_->{value}->{u8}))
+  elsif ('netRemote.play.info.artist' eq $_->{node})
   {
-    # enable navigation if needed!!!
-    SIRD_SendRequest($hash, 'SET', 'netRemote.nav.state', 1, \&SIRD_ParseNavState);
+    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
+
+    readingsBulkUpdateIfChanged($hash, 'currentArtist', $reading);
   }
-  elsif ('netRemote.nav.numItems' eq $_->{node})
+  elsif ('netRemote.play.info.album' eq $_->{node})
   {
-    readingsBulkUpdateIfChanged($hash, '.numNav', $_->{value}->{s32} - 1);
+    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
+
+    readingsBulkUpdateIfChanged($hash, 'currentAlbum', $reading);
+  }
+  elsif ('netRemote.play.info.albumDescription' eq $_->{node})
+  {
+    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
+
+    readingsBulkUpdateIfChanged($hash, 'currentAlbumDescription', $reading);
+  }
+  elsif ('netRemote.play.info.artistDescription' eq $_->{node})
+  {
+    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
+
+    readingsBulkUpdateIfChanged($hash, 'currentArtistDescription', $reading);
+  }
+  elsif ('netRemote.play.info.description' eq $_->{node})
+  {
+    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
+
+    readingsBulkUpdateIfChanged($hash, 'description', $reading);
+  }
+  elsif ('netRemote.play.errorStr' eq $_->{node})
+  {
+    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
+
+    readingsBulkUpdateIfChanged($hash, 'errorStr', $reading);
   }
 }
 
 
-sub SIRD_SendRequest($$$$$;$)
+sub SIRD_SendRequest($$$$$$;$)
 {
-  my ($hash, $cmd, $request, $value, $callback, $cl) = @_;
+  my ($hash, $cmd, $request, $value, $keepalive, $callback, $cl) = @_;
   my $name = $hash->{NAME};
   my $ip = InternalVal($name, 'IP', undef);
   my $pin = InternalVal($name, 'PIN', '1234');
@@ -1279,7 +1346,6 @@ sub SIRD_SendRequest($$$$$;$)
     }
     elsif ('GET_NOTIFIES' eq $cmd)
     {
-      # it seems that sid should only be used to get notifications
       $sid = $hash->{helper}{sid} if (defined($hash->{helper}{sid}));
 
       $_ = $cmd.'?pin='.$pin.'&sid='.$sid
@@ -1299,7 +1365,8 @@ sub SIRD_SendRequest($$$$$;$)
 
     my $param = {
                   url        => 'http://'.$ip.':80/fsapi/'.$_,
-                  timeout    => 6,
+                  timeout    => (0 == $keepalive ? 6 : 60),
+                  keepalive  => $keepalive,
                   hash       => $hash,
                   cmd        => $cmd,
                   request    => $request,
@@ -1328,6 +1395,7 @@ sub SIRD_ParseNotifies($$$)
   my $hash = $param->{hash};
   my $name = $hash->{NAME};
   my $xml;
+  my $notifications = AttrVal($name, 'notifications', 0);
 
   if ('' ne $err)
   {
@@ -1341,7 +1409,7 @@ sub SIRD_ParseNotifies($$$)
 
     if (!$@ && ('FS_OK' eq $xml->{status}) && exists($xml->{notify}))
     {
-      Log3 $name, 5, $name.': Notifies '.$param->{cmd}.' successful.';
+      Log3 $name, 5, $name.': Notifications '.$param->{cmd}.' successful.';
 
       readingsBeginUpdate($hash);
 
@@ -1349,16 +1417,41 @@ sub SIRD_ParseNotifies($$$)
       {
         if (exists($_->{node}))
         {
+          # bugfix
+          $_->{node} =~ s/netremote/netRemote/;
+
           SIRD_SetReadings($hash);
         }
       }
 
       readingsEndUpdate($hash, 1);
     }
+    elsif (!$@ && ('FS_TIMEOUT' eq $xml->{status}))
+    {
+      # do nothing here
+    }
     else
     {
-      Log3 $name, 3, $name.': Notifies '.$param->{cmd}.' failed.';
+      if ('404 Error' eq $data)
+      {
+        SIRD_SendRequest($hash, 'CREATE_SESSION', '', 0, 0, \&SIRD_ParseLogin);
+        delete($hash->{helper}{notifications});
+      }
+      else
+      {
+        Log3 $name, 3, $name.': Notifications '.$param->{cmd}.' failed.';
+      }
     }
+  }
+
+  HttpUtils_Close($param);
+
+  if ((0 != $notifications) && exists($hash->{helper}{sid}))
+  {
+    # restart notifications
+    SIRD_SendRequest($hash, 'GET_NOTIFIES', '', 0, 1, \&SIRD_ParseNotifies);
+
+    Log3 $name, 5, $name.': Notifications restarted';
   }
 }
 
@@ -1513,8 +1606,8 @@ sub SIRD_ParsePower($$$)
 
       if (1 == AttrVal($name, 'autoLogin', 1))
       {
-        SIRD_SendRequest($hash, 'CREATE_SESSION', '', 0, \&SIRD_ParseLogin);
-        #SIRD_SendRequest($hash, 'SET', 'netRemote.sys.info.controllerName', 'FHEM', \&SIRD_ParseController);
+        SIRD_SendRequest($hash, 'CREATE_SESSION', '', 0, 0, \&SIRD_ParseLogin);
+        #SIRD_SendRequest($hash, 'SET', 'netRemote.sys.info.controllerName', 'FHEM', 0, \&SIRD_ParseController);
       }
     }
   }
@@ -2061,6 +2154,8 @@ sub SIRD_ParseNavigation($$$)
     <li><b>ttsLanguage:</b> language setting for text to speech output (default: de)<br></li>
     <li><b>ttsVolume:</b> volume setting for text to speech output (default: 25)<br></li>
     <li><b>ttsWaitTimes:</b> wait times for tts output (default: 0:2:0:2:0:0 = PowerOn:LoadStream:SetVolumeTTS:SetVolumeNormal:SetInput:PowerOff)<br></li>
+    <li><b>updateAfterSet:</b> enable or disable the update of all readings after any set command was triggered (default: enabled)<br></li>
+    <li><b>notifications:</b> Enable or disable notifications (default: disabled). It may be that you will get some readings faster if this feature is enabled (noticeable for big update cycles only).<br></li>
     <br>
   </ul>
 </ul>
