@@ -12,7 +12,7 @@ use strict;
 use warnings;
 use utf8;
 use Encode qw(encode_utf8 decode_utf8);
-use XML::Simple qw(:strict);
+use XML::Bare qw(xmlin forcearray);
 use URI::Escape;
 #use Data::Dumper;
 
@@ -69,7 +69,7 @@ sub SIRD_Define($$)
   $hash->{IP} = $ip;
   $hash->{PIN} = $pin;
   $hash->{INTERVAL} = $interval;
-  $hash->{VERSION} = '1.1.4';
+  $hash->{VERSION} = '1.1.5';
 
   delete($hash->{helper}{suspendUpdate});
   delete($hash->{helper}{notifications});
@@ -115,6 +115,25 @@ sub SIRD_Notify($$)
   }
   else
   {
+    if (!defined(InternalVal($name, 'MODEL', undef)) ||
+        !defined(InternalVal($name, 'UDN', undef)))
+    {
+      my $ip = InternalVal($name, 'IP', undef);
+
+      if (defined($ip))
+      {
+        my $param = {
+                      url        => 'http://'.$ip.':8080/dd.xml',
+                      timeout    => 6,
+                      hash       => $hash,
+                      method     => 'GET',
+                      callback   => \&SIRD_ParseDeviceInfo
+                    };
+
+        HttpUtils_NonblockingGet($param);
+      }
+    }
+
     SIRD_SetNextTimer($hash, int(rand(15)));
   }
 
@@ -404,9 +423,6 @@ sub SIRD_Get($$@) {
     my $ret;
     my ($index, $type) = @args;
 
-    #Log3 $name, 3, $name.': index '.$index if (defined($index));
-    #Log3 $name, 3, $name.': type '.$type if (defined($type));
-
     if (!defined($index) || !defined($type))
     {
       SIRD_StartNavigation($hash, -1, 0, $hash->{CL});
@@ -462,7 +478,7 @@ sub SIRD_CreateLink($$$$$)
   {
     my $xcmd = 'cmd='.uri_escape('get '.$name.' ls '.$itemindex.' '.$itemtype);
 
-    # single escaped ' if directly returned and double escaped ' if asynchOutput is used
+    # single escaped ' if directly returned and double escaped ' if asyncOutput is used
     $xcmd = "FW_cmd(\\'$FW_ME$FW_subdir?XHR=1&$xcmd\\');\$(\\'#FW_okDialog\\').remove();";
 
     return '<a onClick="'.$xcmd.'" style="display:flex;align-items:center;cursor:pointer;">'.$itemname.'</a>';
@@ -571,7 +587,7 @@ sub SIRD_DoNavigation(@)
     $data = GetFileFromURL('http://'.$ip.':80/fsapi/GET/netRemote.nav.numItems?pin='.$pin, 5, '', 1, 5);
     if ($data && ($data =~ /fsapiResponse/))
     {
-      eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => []);};
+      eval {$xml = xmlin($data, keeproot => 0);};
 
       if (!$@ && ('FS_OK' eq $xml->{status}))
       {
@@ -589,8 +605,6 @@ sub SIRD_DoNavigation(@)
 
     if (0 == $retry)
     {
-      #Log3 $name, 3, $name.': numNav = '.$numNav.' lastNumNav = '.$lastNumNav.' index = '.$index;
-
       while (($lastNumNav < ($index + $maxNavigationItems)) && ($lastNumNav < $numNav))
       {
         $data = GetFileFromURL('http://'.$ip.':80/fsapi/LIST_GET_NEXT/netRemote.nav.list/'.$lastNumNav.'?pin='.$pin.'&maxItems=50', 10, '', 1, 5);
@@ -598,22 +612,20 @@ sub SIRD_DoNavigation(@)
         {
           Log3 $name, 5, $name.': data = '.$data;
 
-          eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => ['item', 'field']);};
+          eval {$xml = xmlin($data, keeproot => 0);};
 
           if (!$@ && ('FS_OK' eq $xml->{status}))
           {
             my $result = '';
 
-            #Log3 $name, 3, $name.': '.$lastNumNav.' from '.$numNav;
-
-            foreach my $item (@{$xml->{item}})
+            foreach my $item (@{forcearray($xml->{item})})
             {
-              if (exists($item->{key}) && exists($item->{field}) && (scalar(@{$item->{field}}) >= 1))
+              if (exists($item->{key}) && exists($item->{field}) && (scalar(@{forcearray($item->{field})}) >= 1))
               {
                 my $type = undef;
                 my $name = undef;
 
-                foreach my $field (@{$item->{field}})
+                foreach my $field (@{forcearray($item->{field})})
                 {
                   if (exists($field->{name}) && ('name' eq $field->{name}) && !ref($field->{c8_array}))
                   {
@@ -803,7 +815,7 @@ sub SIRD_DoSpeak(@)
     GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.power?pin='.$pin.'&value=1', 5, '', 1, 5);
     if ($data && ($data =~ /fsapiResponse/))
     {
-      eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => []);};
+      eval {$xml = xmlin($data, keeproot => 0);};
 
       if (!$@ && ('FS_OK' eq $xml->{status}))
       {
@@ -814,7 +826,7 @@ sub SIRD_DoSpeak(@)
           $data = GetFileFromURL('http://'.$ip.':80/fsapi/GET/netRemote.sys.power?pin='.$pin, 5, '', 1, 5);
           if ($data && ($data =~ /fsapiResponse/))
           {
-            eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => []);};
+            eval {$xml = xmlin($data, keeproot => 0);};
 
             if (!$@ && ('FS_OK' eq $xml->{status}))
             {
@@ -928,7 +940,7 @@ sub SIRD_DoSpeak(@)
     $data = GetFileFromURL('http://'.$ip.':80/fsapi/GET/netRemote.play.status?pin='.$pin, 5, '', 1, 5);
     if ($data && ($data =~ /fsapiResponse/))
     {
-      eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => []);};
+      eval {$xml = xmlin($data, keeproot => 0);};
 
       if (!$@ && ('FS_OK' eq $xml->{status}))
       {
@@ -1170,20 +1182,20 @@ sub SIRD_SetReadings($)
   my $name = $hash->{NAME};
   my $reading;
 
-  if (('netRemote.nav.state' eq $_->{node}) && (0 == $_->{value}->{u8}))
+  if (('nav.state' eq $_->{node}) && (0 == $_->{value}->{u8}))
   {
     # enable navigation if needed!!!
     SIRD_SendRequest($hash, 'SET', 'netRemote.nav.state', 1, 0, \&SIRD_ParseNavState);
   }
-  elsif ('netRemote.sys.caps.volumeSteps' eq $_->{node})
+  elsif ('sys.caps.volumeSteps' eq $_->{node})
   {
     readingsBulkUpdateIfChanged($hash, '.volumeSteps', ($_->{value}->{u8} > 20 && $_->{value}->{u8} < 99 ? $_->{value}->{u8} - 1 : 20));
   }
-  elsif ('netRemote.nav.numItems' eq $_->{node})
+  elsif ('nav.numItems' eq $_->{node})
   {
     readingsBulkUpdateIfChanged($hash, '.numNav', $_->{value}->{s32} - 1);
   }
-  elsif ('netRemote.sys.mode' eq $_->{node})
+  elsif ('sys.mode' eq $_->{node})
   {
     my $inputReading = ReadingsVal($name, '.inputs', '');
 
@@ -1192,63 +1204,63 @@ sub SIRD_SetReadings($)
       readingsBulkUpdateIfChanged($hash, 'input', $1);
     }
   }
-  elsif ('netRemote.sys.info.version' eq $_->{node})
+  elsif ('sys.info.version' eq $_->{node})
   {
     $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
 
     readingsBulkUpdateIfChanged($hash, 'version', $reading);
   }
-  elsif ('netRemote.sys.info.friendlyName' eq $_->{node})
+  elsif ('sys.info.friendlyName' eq $_->{node})
   {
     $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
 
     readingsBulkUpdateIfChanged($hash, 'friendlyName', $reading);
   }
-  elsif ('netRemote.sys.audio.volume' eq $_->{node})
+  elsif ('sys.audio.volume' eq $_->{node})
   {
     my $volumeSteps = ReadingsVal($name, '.volumeSteps', 20);
 
     readingsBulkUpdateIfChanged($hash, 'volume', int($_->{value}->{u8} * (100 / $volumeSteps)));
     readingsBulkUpdateIfChanged($hash, 'volumeStraight', int($_->{value}->{u8}));
   }
-  elsif ('netRemote.sys.net.wlan.rssi' eq $_->{node})
+  elsif ('sys.net.wlan.rssi' eq $_->{node})
   {
     readingsBulkUpdateIfChanged($hash, 'rssi', $_->{value}->{u8});
   }
-  elsif ('netRemote.play.info.name' eq $_->{node})
+  elsif ('play.info.name' eq $_->{node})
   {
     $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
 
     readingsBulkUpdateIfChanged($hash, 'currentTitle', $reading);
   }
-  elsif ('netRemote.play.info.duration' eq $_->{node})
+  elsif ('play.info.duration' eq $_->{node})
   {
     readingsBulkUpdateIfChanged($hash, 'duration', $_->{value}->{u32});
   }
-  elsif ('netRemote.play.signalStrength' eq $_->{node})
+  elsif ('play.signalStrength' eq $_->{node})
   {
     readingsBulkUpdateIfChanged($hash, 'signalStrength', $_->{value}->{u8});
   }
-  elsif ('netRemote.play.info.graphicUri' eq $_->{node})
+  elsif ('play.info.graphicUri' eq $_->{node})
   {
     $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
 
     readingsBulkUpdateIfChanged($hash, 'graphicUri', $reading);
   }
-  elsif ('netRemote.play.info.text' eq $_->{node})
+  elsif ('play.info.text' eq $_->{node})
   {
     $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
 
     readingsBulkUpdateIfChanged($hash, 'infoText', $reading);
   }
-  elsif ('netRemote.play.status' eq $_->{node})
+  elsif ('play.status' eq $_->{node})
   {
     my @result = ('idle', 'buffering', 'playing', 'paused', 'rebuffering', 'error', 'stopped');
     $reading = ($_->{value}->{u8} < 7 ? $result[$_->{value}->{u8}] : 'unknown');
 
     readingsBulkUpdateIfChanged($hash, 'playStatus', $reading);
   }
-  elsif ('netRemote.play.position' eq $_->{node})
+  elsif ('play.position' eq $_->{node})
   {
     my $minutes = $_->{value}->{u32} / 60000;
     my $seconds = ($_->{value}->{u32} / 1000) - (($_->{value}->{u32} / 60000) * 60);
@@ -1256,19 +1268,19 @@ sub SIRD_SetReadings($)
 
     readingsBulkUpdateIfChanged($hash, 'position', $reading);
   }
-  elsif ('netRemote.play.repeat' eq $_->{node})
+  elsif ('play.repeat' eq $_->{node})
   {
     $reading = (1 == $_->{value}->{u8} ? 'on' : 'off');
 
     readingsBulkUpdateIfChanged($hash, 'repeat', $reading);
   }
-  elsif ('netRemote.play.shuffle' eq $_->{node})
+  elsif ('play.shuffle' eq $_->{node})
   {
     $reading = (1 == $_->{value}->{u8} ? 'on' : 'off');
 
     readingsBulkUpdateIfChanged($hash, 'shuffle', $reading);
   }
-  elsif ('netRemote.play.frequency' eq $_->{node})
+  elsif ('play.frequency' eq $_->{node})
   {
     if ($_->{value}->{u32} < 200000)
     {
@@ -1279,43 +1291,43 @@ sub SIRD_SetReadings($)
       readingsBulkUpdateIfChanged($hash, 'frequency', '');
     }
   }
-  elsif ('netRemote.sys.audio.mute' eq $_->{node})
+  elsif ('sys.audio.mute' eq $_->{node})
   {
     $reading = (1 == $_->{value}->{u8} ? 'on' : 'off');
 
     readingsBulkUpdateIfChanged($hash, 'mute', $reading);
   }
-  elsif ('netRemote.play.info.artist' eq $_->{node})
+  elsif ('play.info.artist' eq $_->{node})
   {
     $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
 
     readingsBulkUpdateIfChanged($hash, 'currentArtist', $reading);
   }
-  elsif ('netRemote.play.info.album' eq $_->{node})
+  elsif ('play.info.album' eq $_->{node})
   {
     $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
 
     readingsBulkUpdateIfChanged($hash, 'currentAlbum', $reading);
   }
-  elsif ('netRemote.play.info.albumDescription' eq $_->{node})
+  elsif ('play.info.albumDescription' eq $_->{node})
   {
     $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
 
     readingsBulkUpdateIfChanged($hash, 'currentAlbumDescription', $reading);
   }
-  elsif ('netRemote.play.info.artistDescription' eq $_->{node})
+  elsif ('play.info.artistDescription' eq $_->{node})
   {
     $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
 
     readingsBulkUpdateIfChanged($hash, 'currentArtistDescription', $reading);
   }
-  elsif ('netRemote.play.info.description' eq $_->{node})
+  elsif ('play.info.description' eq $_->{node})
   {
     $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
 
     readingsBulkUpdateIfChanged($hash, 'description', $reading);
   }
-  elsif ('netRemote.play.errorStr' eq $_->{node})
+  elsif ('play.errorStr' eq $_->{node})
   {
     $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
 
@@ -1405,7 +1417,7 @@ sub SIRD_ParseNotifies($$$)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
-    eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => ['notify']);};
+    eval {$xml = xmlin($data, keeproot => 0);};
 
     if (!$@ && ('FS_OK' eq $xml->{status}) && exists($xml->{notify}))
     {
@@ -1413,12 +1425,11 @@ sub SIRD_ParseNotifies($$$)
 
       readingsBeginUpdate($hash);
 
-      foreach (@{$xml->{notify}})
+      foreach (@{forcearray($xml->{notify})})
       {
         if (exists($_->{node}))
         {
-          # bugfix
-          $_->{node} =~ s/netremote/netRemote/;
+          $_->{node} = substr($_->{node}, 10);
 
           SIRD_SetReadings($hash);
         }
@@ -1471,7 +1482,7 @@ sub SIRD_ParseMultiple($$$)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
-    eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => ['fsapiResponse']);};
+    eval {$xml = xmlin($data, keeproot => 0);};
 
     readingsBeginUpdate($hash);
 
@@ -1479,10 +1490,12 @@ sub SIRD_ParseMultiple($$$)
     {
       Log3 $name, 5, $name.': Multiple '.$param->{cmd}.' successful.';
 
-      foreach (@{$xml->{fsapiResponse}})
+      foreach (@{forcearray($xml->{fsapiResponse})})
       {
         if (exists($_->{node}) && exists($_->{status}) && exists($_->{value}) && ('FS_OK' eq $_->{status}))
         {
+          $_->{node} = substr($_->{node}, 10);
+
           SIRD_SetReadings($hash);
         }
       }
@@ -1512,7 +1525,7 @@ sub SIRD_ParseGeneral($$$)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
-    eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => []);};
+    eval {$xml = xmlin($data, keeproot => 0);};
 
     if (!$@ && ('FS_OK' eq $xml->{status}))
     {
@@ -1520,7 +1533,7 @@ sub SIRD_ParseGeneral($$$)
 
       if ('GET' eq $param->{cmd})
       {
-        $xml->{node} = $param->{request};
+        $xml->{node} = substr($param->{request}, 10);
         $_ = $xml;
 
         readingsBeginUpdate($hash);
@@ -1551,7 +1564,7 @@ sub SIRD_ParseLogin($$$)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
-    eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => []);};
+    eval {$xml = xmlin($data, keeproot => 0);};
 
     if (!$@ && ('FS_OK' eq $xml->{status}))
     {
@@ -1582,7 +1595,7 @@ sub SIRD_ParsePower($$$)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
-    eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => []);};
+    eval {$xml = xmlin($data, keeproot => 0);};
 
     if (!$@ && ('FS_OK' eq $xml->{status}))
     {
@@ -1629,7 +1642,7 @@ sub SIRD_ParsePlay($$$)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
-    eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => []);};
+    eval {$xml = xmlin($data, keeproot => 0);};
 
     if (!$@ && ('FS_OK' eq $xml->{status}))
     {
@@ -1678,7 +1691,7 @@ sub SIRD_ParseVolume($$$)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
-    eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => []);};
+    eval {$xml = xmlin($data, keeproot => 0);};
 
     if (!$@ && ('FS_OK' eq $xml->{status}))
     {
@@ -1720,7 +1733,7 @@ sub SIRD_ParseMute($$$)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
-    eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => []);};
+    eval {$xml = xmlin($data, keeproot => 0);};
 
     if (!$@ && ('FS_OK' eq $xml->{status}))
     {
@@ -1758,7 +1771,7 @@ sub SIRD_ParseShuffle($$$)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
-    eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => []);};
+    eval {$xml = xmlin($data, keeproot => 0);};
 
     if (!$@ && ('FS_OK' eq $xml->{status}))
     {
@@ -1796,7 +1809,7 @@ sub SIRD_ParseRepeat($$$)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
-    eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => []);};
+    eval {$xml = xmlin($data, keeproot => 0);};
 
     if (!$@ && ('FS_OK' eq $xml->{status}))
     {
@@ -1834,7 +1847,7 @@ sub SIRD_ParseNavState($$$)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
-    eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => []);};
+    eval {$xml = xmlin($data, keeproot => 0);};
 
     if (!$@ && ('FS_OK' eq $xml->{status}))
     {
@@ -1863,7 +1876,7 @@ sub SIRD_ParseInputs($$$)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
-    eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => ['item', 'field']);};
+    eval {$xml = xmlin($data, keeproot => 0);};
 
     if (!$@ && ('FS_OK' eq $xml->{status}))
     {
@@ -1882,11 +1895,11 @@ sub SIRD_ParseInputs($$$)
 
         Log3 $name, 5, $name.': Inputs '.$param->{cmd}.' successful.';
 
-        foreach my $item (@{$xml->{item}})
+        foreach my $item (@{forcearray($xml->{item})})
         {
-          if (exists($item->{key}) && exists($item->{field}) && (scalar(@{$item->{field}}) >= 1))
+          if (exists($item->{key}) && exists($item->{field}) && (scalar(@{forcearray($item->{field})}) >= 1))
           {
-            foreach my $field (@{$item->{field}})
+            foreach my $field (@{forcearray($item->{field})})
             {
               if (exists($field->{name}) && ('label' eq $field->{name}) && !ref($field->{c8_array}))
               {
@@ -1932,7 +1945,7 @@ sub SIRD_ParsePresets($$$)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
-    eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => ['item']);};
+    eval {$xml = xmlin($data, keeproot => 0);};
 
     if (!$@ && ('FS_OK' eq $xml->{status}))
     {
@@ -1955,7 +1968,7 @@ sub SIRD_ParsePresets($$$)
 
         Log3 $name, 5, $name.': Presets '.$param->{cmd}.' successful.';
 
-        foreach my $item (@{$xml->{item}})
+        foreach my $item (@{forcearray($xml->{item})})
         {
           if (exists($item->{key}) && exists($item->{field}) && !ref($item->{field}->{c8_array}))
           {
@@ -2002,7 +2015,7 @@ sub SIRD_ParseNavigation($$$)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
-    eval {$xml = XMLin($data, KeyAttr => {}, ForceArray => ['item', 'field']);};
+    eval {$xml = xmlin($data, keeproot => 0);};
 
     if (!$@ && ('FS_OK' eq $xml->{status}))
     {
@@ -2019,14 +2032,14 @@ sub SIRD_ParseNavigation($$$)
 
         Log3 $name, 5, $name.': Navigation '.$param->{cmd}.' successful.';
 
-        foreach my $item (@{$xml->{item}})
+        foreach my $item (@{forcearray($xml->{item})})
         {
-          if (exists($item->{key}) && exists($item->{field}) && (scalar(@{$item->{field}}) >= 1))
+          if (exists($item->{key}) && exists($item->{field}) && (scalar(@{forcearray($item->{field})}) >= 1))
           {
             my $type = undef;
             my $name = undef;
 
-            foreach my $field (@{$item->{field}})
+            foreach my $field (@{forcearray($item->{field})})
             {
               if (exists($field->{name}) && ('name' eq $field->{name}) && !ref($field->{c8_array}))
               {
@@ -2076,6 +2089,36 @@ sub SIRD_ParseNavigation($$$)
 }
 
 
+sub SIRD_ParseDeviceInfo($$$)
+{
+  my ($param, $err, $data) = @_;
+  my $hash = $param->{hash};
+  my $name = $hash->{NAME};
+  my $xml;
+
+  if ('' ne $err)
+  {
+    Log3 $name, 5, $name.': Error while requesting '.$param->{url}.' - '.$err;
+  }
+  elsif ('' ne $data)
+  {
+    Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
+
+    eval {$xml = xmlin($data, keeproot => 0);};
+
+    if (!$@)
+    {
+      $hash->{MODEL} = encode_utf8(!ref($xml->{device}->{modelName}) ? $xml->{device}->{modelName} : '');
+      $hash->{UDN} = encode_utf8(!ref($xml->{device}->{UDN}) ? $xml->{device}->{UDN} : '');
+    }
+    else
+    {
+      Log3 $name, 3, $name.': DeviceInfo failed.';
+    }
+  }
+}
+
+
 1;
 
 =pod
@@ -2092,7 +2135,7 @@ sub SIRD_ParseNavigation($$$)
   <a name="SIRDinstallation"></a>
   <b>Installation</b>
   <ul><br>
-    tbd
+    <code>sudo apt-get install libxml-bare-perl</code><br>
   </ul>
   <br><br>
   <a name="SIRDdefine"></a>
