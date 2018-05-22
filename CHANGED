@@ -1,3 +1,6 @@
-- switched from XML::Simple to XML::Bare (sudo apt-get install libxml-bare-perl)
-- internals MODEL and UDN added
-- version increased from 1.1.4 to 1.1.5
+- command stream added to stream any http url or local files
+- attribute streamInput added (default: dmr)
+- attribute streamWaitTimes added (default: 0:2:0:0)
+- attribute streamPath added (default: /opt/fhem/)
+- attribute streamPort added (default: 5000)
+- version increased from 1.1.5 to 1.1.6
