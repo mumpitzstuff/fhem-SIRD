@@ -402,7 +402,7 @@ sub SIRD_Set($$@) {
   elsif ('stream' eq $cmd)
   {
     my $streamInput = AttrVal($name, 'streamInput', 'dmr');
-    my $streamPath = AttrVal($name, 'streamPath', '/opt/fhem/');
+    my $streamPath = AttrVal($name, 'streamPath', '/opt/fhem/www/');
     my $streamPort = AttrVal($name, 'streamPort', 5000);
 
     if (('' ne $input) && ($streamInput eq $input))
@@ -430,8 +430,6 @@ sub SIRD_Set($$@) {
                                          PeerAddr => '198.41.0.4',
                                          PeerPort => '53');
       my $ip = $socket->sockhost;
-
-      #Log3 $name, 3, $name.': '.$ip;
 
       SIRD_StartWebserver($hash, $streamPort, $streamPath, $arg);
       SIRD_StartStream($hash, 'http://'.$ip.':'.$streamPort.'/'.$arg, $input, $streamInput);
@@ -2311,13 +2309,19 @@ sub SIRD_ParsePresets($$$)
 
         foreach my $item (@{forcearray($xml->{item})})
         {
-          if (exists($item->{key}) && exists($item->{field}) && !ref($item->{field}->{c8_array}))
+          if (exists($item->{key}) && exists($item->{field}) && (scalar(@{forcearray($item->{field})}) >= 1))
           {
-            $_ = $item->{field}->{c8_array};
-            $_ =~ s/(?:\:|,)//g;
+            foreach my $field (@{forcearray($item->{field})})
+            {
+              if (exists($field->{name}) && ('name' eq $field->{name}) && !ref($field->{c8_array}))
+              {
+                $_ = $field->{c8_array};
+                $_ =~ s/(?:\:|,)//g;
 
-            $presets .= ',' if ('' ne $presets);
-            $presets .= $item->{key}.':'.$_;
+                $presets .= ',' if ('' ne $presets);
+                $presets .= $item->{key}.':'.$_;
+              }
+            }
           }
         }
 
