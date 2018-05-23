@@ -69,7 +69,7 @@ sub SIRD_Define($$)
   $hash->{IP} = $ip;
   $hash->{PIN} = $pin;
   $hash->{INTERVAL} = $interval;
-  $hash->{VERSION} = '1.1.5';
+  $hash->{VERSION} = '1.1.6';
 
   delete($hash->{helper}{suspendUpdate});
   delete($hash->{helper}{notifications});
@@ -1970,13 +1970,19 @@ sub SIRD_ParsePresets($$$)
 
         foreach my $item (@{forcearray($xml->{item})})
         {
-          if (exists($item->{key}) && exists($item->{field}) && !ref($item->{field}->{c8_array}))
+          if (exists($item->{key}) && exists($item->{field}) && (scalar(@{forcearray($item->{field})}) >= 1))
           {
-            $_ = $item->{field}->{c8_array};
-            $_ =~ s/(?:\:|,)//g;
+            foreach my $field (@{forcearray($item->{field})})
+            {
+              if (exists($field->{name}) && ('name' eq $field->{name}) && !ref($field->{c8_array}))
+              {
+                $_ = $field->{c8_array};
+                $_ =~ s/(?:\:|,)//g;
 
-            $presets .= ',' if ('' ne $presets);
-            $presets .= $item->{key}.':'.$_;
+                $presets .= ',' if ('' ne $presets);
+                $presets .= $item->{key}.':'.$_;
+              }
+            }
           }
         }
 

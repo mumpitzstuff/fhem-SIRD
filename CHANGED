@@ -1,3 +1,2 @@
-- switched from XML::Simple to XML::Bare (sudo apt-get install libxml-bare-perl)
-- internals MODEL and UDN added
-- version increased from 1.1.4 to 1.1.5
+- bugfix for radios with new firmware
+- version increased from 1.1.5 to 1.1.6
