@@ -1,6 +1,9 @@
 - command stream added to stream any http url or local files
 - attribute streamInput added (default: dmr)
-- attribute streamWaitTimes added (default: 0:2:0:0)
-- attribute streamPath added (default: /opt/fhem/)
+- attribute streamWaitTimes added (default: 0:0:0:0)
+- attribute streamPath added (default: /opt/fhem/www/)
 - attribute streamPort added (default: 5000)
-- version increased from 1.1.5 to 1.1.6
+- attribute ttsJingle added to play a jingle located on a webserver or Dlna server in front of the speak command
+- attribute ttsWaitTimes can now be 0:0:0:2:0:0 (default value changed)
+- some internal changes to increase stability of speak
+- version increased from 1.1.6 to 1.1.7
