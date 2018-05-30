@@ -588,6 +588,39 @@ sub SIRD_CreateLink($$$$$)
 }
 
 
+sub SIRD_SplitSpeak($)
+{
+  my $text = shift;
+  my $index;
+
+  if (length($text) > 100)
+  {
+    $index = rindex($text, '.', 100);
+
+    if (($index < 0) || ((length($text) - $index) > 100))
+    {
+      $index = rindex($text, ',', 100);
+
+      if (($index < 0) || ((length($text) - $index) > 100))
+      {
+        $index = rindex($text, ' ', 100);
+
+        if (($index < 0) || ((length($text) - $index) > 100))
+        {
+          $index = 99;
+        }
+      }
+    }
+
+    return (substr($text, 0, $index + 1), substr($text, $index + 1));
+  }
+  else
+  {
+    return ($text, undef);
+  }
+}
+
+
 sub SIRD_SetNextTimer($$)
 {
   my ($hash, $timer) = @_;
@@ -863,9 +896,13 @@ sub SIRD_StartSpeak($$$$$)
     BlockingKill($hash->{helper}{PID_SPEAK}) if (defined($hash->{helper}{PID_SPEAK}));
   }
 
-  if (length($text) > 100)
+  if (('' ne $ttsJingle) && (length($text) > 100))
   {
     Log3 $name, 3, $name.': Too many chars for speak (more than 100).';
+  }
+  elsif (('' eq $ttsJingle) && (length($text) > 200))
+  {
+    Log3 $name, 3, $name.': Too many chars for speak (more than 200).';
   }
 
   $hash->{helper}{suspendUpdate} = 1;
@@ -880,15 +917,31 @@ sub SIRD_DoSpeak(@)
   my ($name, $ip, $pin, $text, $ttsJingle, $language, $input, $ttsInput, $volume, $ttsVolume, $volumeStraight, $volumeSteps, $power, $ttsWaitTimes) = split("\\|", $string);
   my ($ttsWait1, $ttsWait2, $ttsWait3, $ttsWait4, $ttsWait5, $ttsWait6) = split("\\:", $ttsWaitTimes);
   my $startTime;
+  my $urlA;
+  my $urlB = undef;
+
+  Log3 $name, 5, $name.': Blocking call running to speak.';
 
   eval { $text = decode_base64($text) };
 
-  my $uri_text = uri_escape($text);
-  my $url = 'http://translate.google.com/translate_tts?ie=UTF-8&tl='.$language.'&client=tw-ob&q='.$uri_text;
+  if ('' ne $ttsJingle)
+  {
+    $urlA = 'http://translate.google.com/translate_tts?ie=UTF-8&tl='.$language.'&client=tw-ob&q='.uri_escape($text);
+    $urlA =~ s/\&/\&amp\;/g;
+  }
+  else
+  {
+    my ($uri_textA, $uri_textB) = SIRD_SplitSpeak($text);
 
-  $url =~ s/\&/\&amp\;/g;
+    $urlA = 'http://translate.google.com/translate_tts?ie=UTF-8&tl='.$language.'&client=tw-ob&q='.uri_escape($uri_textA);
+    $urlA =~ s/\&/\&amp\;/g;
 
-  Log3 $name, 5, $name.': Blocking call running to speak.';
+    if (defined($uri_textB))
+    {
+      $urlB = 'http://translate.google.com/translate_tts?ie=UTF-8&tl='.$language.'&client=tw-ob&q='.uri_escape($uri_textB);
+      $urlB =~ s/\&/\&amp\;/g;
+    }
+  }
 
   if ('' ne $ttsInput)
   {
@@ -909,11 +962,12 @@ sub SIRD_DoSpeak(@)
   if ('' ne $ttsJingle)
   {
     SIRD_DlnaSetAVTransportURI($name, $ip, $ttsJingle);
-    SIRD_DlnaSetNextAVTransportURI($name, $ip, $url);
+    SIRD_DlnaSetNextAVTransportURI($name, $ip, $urlA);
   }
   else
   {
-    SIRD_DlnaSetAVTransportURI($name, $ip, $url);
+    SIRD_DlnaSetAVTransportURI($name, $ip, $urlA);
+    SIRD_DlnaSetNextAVTransportURI($name, $ip, $urlB) if (defined($urlB));
   }
 
   $startTime = time();
@@ -2726,7 +2780,7 @@ sub SIRD_DlnaGetTransportInfo($$;$)
     <li>shuffle - on/off</li>
     <li>repeat - on/off</li>
     <li>statusRequest - update all readings</li>
-    <li>speak - text to speech for up to 100 chars</li>
+    <li>speak - text to speech for up to 200 chars if ttsJingle is not used and up to 100 chars if ttsJingle is used (text is split by dot, comma or space)</li>
     <li>stream - stream media files from a local directory or files located on a webserver or Dlna server</li>
     <br>
   </ul>
