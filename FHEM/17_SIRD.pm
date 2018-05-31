@@ -217,9 +217,9 @@ sub SIRD_Attr($$$$) {
     }
     elsif ('ttsJingle' eq $attribute)
     {
-      if (($value !~ /^https?:\/\//i) || ($value !~ /\.mp3$/i))
+      if (($value !~ /^https?:\/\//i) || (($value !~ /\.mp3$/i) && ($value !~ /\/$/)))
       {
-        return 'ttsJingle must start with http(s):// and end with .mp3';
+        return 'ttsJingle must start with http(s):// and end with .mp3 or /';
       }
     }
     elsif ('compatibilityMode' eq $attribute)
@@ -885,7 +885,7 @@ sub SIRD_StartSpeak($$$$$)
   my $ttsWaitTimes = AttrVal($name, 'ttsWaitTimes', '0:0:0:2:0:0');
   my $ttsJingle = AttrVal($name, 'ttsJingle', '');
   my $power = ReadingsVal($name, 'power', 'on');
-  my $ttsVolume = AttrVal($name, 'ttsVolume', 25);
+  my $ttsVolume = AttrVal($name, 'ttsVolume', -1);
   my $volume = ReadingsVal($name, 'volume', 25);
   my $volumeStraight = ReadingsVal($name, 'volumeStraight', int($volume / (100 / $volumeSteps)));
 
@@ -917,6 +917,7 @@ sub SIRD_DoSpeak(@)
   my ($name, $ip, $pin, $text, $ttsJingle, $language, $input, $ttsInput, $volume, $ttsVolume, $volumeStraight, $volumeSteps, $power, $ttsWaitTimes) = split("\\|", $string);
   my ($ttsWait1, $ttsWait2, $ttsWait3, $ttsWait4, $ttsWait5, $ttsWait6) = split("\\:", $ttsWaitTimes);
   my $startTime;
+  my $jingleFile = '';
   my $urlA;
   my $urlB = undef;
 
@@ -924,7 +925,14 @@ sub SIRD_DoSpeak(@)
 
   eval { $text = decode_base64($text) };
 
-  if ('' ne $ttsJingle)
+  if ($text =~ /\|([^\|]+)\|/)
+  {
+    $jingleFile = $1;
+
+    $text =~ s/\|[^\|]+\|//;
+  }
+
+  if ('' ne $ttsJingle.$jingleFile)
   {
     $urlA = 'http://translate.google.com/translate_tts?ie=UTF-8&tl='.$language.'&client=tw-ob&q='.uri_escape($text);
     $urlA =~ s/\&/\&amp\;/g;
@@ -959,9 +967,9 @@ sub SIRD_DoSpeak(@)
 
   SIRD_DlnaStop($name, $ip);
 
-  if ('' ne $ttsJingle)
+  if ('' ne $ttsJingle.$jingleFile)
   {
-    SIRD_DlnaSetAVTransportURI($name, $ip, $ttsJingle);
+    SIRD_DlnaSetAVTransportURI($name, $ip, $ttsJingle.$jingleFile);
     SIRD_DlnaSetNextAVTransportURI($name, $ip, $urlA);
   }
   else
@@ -975,7 +983,7 @@ sub SIRD_DoSpeak(@)
 
   sleep($ttsWait2) if ($ttsWait2 > 0);
 
-  if ($volume != $ttsVolume)
+  if (($volume != $ttsVolume) && ($ttsVolume >= 0))
   {
     GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.audio.volume?pin='.$pin.'&value='.int($ttsVolume / (100 / $volumeSteps)), 5, '', 1, 5);
 
@@ -987,7 +995,7 @@ sub SIRD_DoSpeak(@)
   $startTime = time();
   while (((time() - $startTime) < 120) && ('STOPPED' ne SIRD_DlnaGetTransportInfo($name, $ip))) {};
 
-  if ($volume != $ttsVolume)
+  if (($volume != $ttsVolume) && ($ttsVolume >= 0))
   {
     GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.audio.volume?pin='.$pin.'&value='.int($volumeStraight), 5, '', 1, 5);
 
@@ -2344,33 +2352,42 @@ sub SIRD_PowerOn($$$)
 
   Log3 $name, 5, $name.': start power on.';
 
-  $data = GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.power?pin='.$pin.'&value=1', 5, '', 1, 5);
+  $data = GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.audio.mute?pin='.$pin.'&value=1', 5, '', 1, 5);
   if ($data && ($data =~ /fsapiResponse/))
   {
     eval {$xml = xmlin($data, keeproot => 0);};
 
     if (!$@ && ('FS_OK' eq $xml->{status}))
     {
-      $startTime = time();
-
-      do
+      $data = GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.power?pin='.$pin.'&value=1', 5, '', 1, 5);
+      if ($data && ($data =~ /fsapiResponse/))
       {
-        $data = GetFileFromURL('http://'.$ip.':80/fsapi/GET/netRemote.sys.power?pin='.$pin, 5, '', 1, 5);
-        if ($data && ($data =~ /fsapiResponse/))
+        eval {$xml = xmlin($data, keeproot => 0);};
+
+        if (!$@ && ('FS_OK' eq $xml->{status}))
         {
-          eval {$xml = xmlin($data, keeproot => 0);};
+          $startTime = time();
 
-          if (!$@ && ('FS_OK' eq $xml->{status}))
+          do
           {
-            if (1 == $xml->{value}->{u8})
+            $data = GetFileFromURL('http://'.$ip.':80/fsapi/GET/netRemote.sys.power?pin='.$pin, 5, '', 1, 5);
+            if ($data && ($data =~ /fsapiResponse/))
             {
-              Log3 $name, 5, $name.': power on successfully completed.';
+              eval {$xml = xmlin($data, keeproot => 0);};
 
-              $startTime -= 100;
+              if (!$@ && ('FS_OK' eq $xml->{status}))
+              {
+                if (1 == $xml->{value}->{u8})
+                {
+                  Log3 $name, 5, $name.': power on successfully completed.';
+
+                  $startTime -= 100;
+                }
+              }
             }
-          }
+          } while (((time() - $startTime) < 15));
         }
-      } while (((time() - $startTime) < 15));
+      }
     }
   }
 }
