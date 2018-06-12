@@ -14,7 +14,9 @@ use utf8;
 use Encode qw(encode_utf8 decode_utf8);
 use XML::Bare qw(xmlin forcearray);
 use URI::Escape;
-#use Data::Dumper;
+use HTTP::Daemon;
+use IO::Socket::INET;
+use Data::Dumper;
 
 use HttpUtils;
 use Blocking;
@@ -28,24 +30,30 @@ sub SIRD_Initialize($)
 {
   my ($hash) = @_;
 
-  $hash->{DefFn}    = 'SIRD_Define';
-  $hash->{UndefFn}  = 'SIRD_Undefine';
-  $hash->{NotifyFn} = 'SIRD_Notify';
-  $hash->{SetFn}    = 'SIRD_Set';
-  $hash->{GetFn}    = 'SIRD_Get';
-  $hash->{AttrFn}   = 'SIRD_Attr';
-  $hash->{AttrList} = 'disable:0,1 '.
-                      'autoLogin:0,1 '.
-                      'compatibilityMode:0,1 '.
-                      'playCommands '.
-                      'maxNavigationItems '.
-                      'ttsInput '.
-                      'ttsLanguage '.
-                      'ttsVolume '.
-                      'ttsWaitTimes '.
-                      'updateAfterSet:0,1 '.
-                      'notifications:0,1 '.
-                      $readingFnAttributes;
+  $hash->{DefFn}      = 'SIRD_Define';
+  $hash->{UndefFn}    = 'SIRD_Undefine';
+  $hash->{ShutdownFn} = 'SIRD_Undefine';
+  $hash->{NotifyFn}   = 'SIRD_Notify';
+  $hash->{SetFn}      = 'SIRD_Set';
+  $hash->{GetFn}      = 'SIRD_Get';
+  $hash->{AttrFn}     = 'SIRD_Attr';
+  $hash->{AttrList}   = 'disable:0,1 '.
+                        'autoLogin:0,1 '.
+                        'compatibilityMode:0,1 '.
+                        'playCommands '.
+                        'maxNavigationItems '.
+                        'ttsInput '.
+                        'ttsLanguage '.
+                        'ttsVolume '.
+                        'ttsJinglePath '.
+                        'ttsWaitTimes '.
+                        'streamInput '.
+                        'streamWaitTimes '.
+                        'streamPath '.
+                        'streamPort '.
+                        'updateAfterSet:0,1 '.
+                        'notifications:0,1 '.
+                        $readingFnAttributes;
 
   return undef;
 }
@@ -69,7 +77,7 @@ sub SIRD_Define($$)
   $hash->{IP} = $ip;
   $hash->{PIN} = $pin;
   $hash->{INTERVAL} = $interval;
-  $hash->{VERSION} = '1.1.6';
+  $hash->{VERSION} = '1.1.7';
 
   delete($hash->{helper}{suspendUpdate});
   delete($hash->{helper}{notifications});
@@ -93,8 +101,10 @@ sub SIRD_Undefine($$)
 
   RemoveInternalTimer($hash);
   SetExtensionsCancel($hash);
-  SIRD_AbortNavigation($hash);
-  SIRD_AbortSpeak($hash);
+  BlockingKill($hash->{helper}{PID_NAVIGATION}) if (defined($hash->{helper}{PID_NAVIGATION}));
+  BlockingKill($hash->{helper}{PID_SPEAK}) if (defined($hash->{helper}{PID_SPEAK}));
+  BlockingKill($hash->{helper}{PID_STREAM}) if (defined($hash->{helper}{PID_STREAM}));
+  BlockingKill($hash->{helper}{PID_WEBSERVER}) if (defined($hash->{helper}{PID_WEBSERVER}));
   HttpUtils_Close($hash);
 
   return undef;
@@ -205,6 +215,13 @@ sub SIRD_Attr($$$$) {
         return 'ttsWaitTimes must be 6 numbers equal or greater than 0 joint by : (default: 0:2:0:2:0:0)';
       }
     }
+    elsif ('ttsJinglePath' eq $attribute)
+    {
+      if (($value !~ /^https?:\/\//i) || ($value !~ /\/$/))
+      {
+        return 'ttsJinglePath must start with http(s):// and end with /';
+      }
+    }
     elsif ('compatibilityMode' eq $attribute)
     {
       if ((0 != $value) && ($hash->{INTERVAL} < 10))
@@ -215,6 +232,17 @@ sub SIRD_Attr($$$$) {
     elsif ('notifications' eq $attribute)
     {
       delete($hash->{helper}{notifications});
+    }
+    elsif ('streamPath' eq $attribute)
+    {
+      if ($value !~ /^\//)
+      {
+        return 'streamPath must start with /';
+      }
+      elsif ($value !~ /\/$/)
+      {
+        return 'streamPath must end with /';
+      }
     }
   }
 
@@ -233,6 +261,7 @@ sub SIRD_Set($$@) {
   my $inputReading = ReadingsVal($name, '.inputs', undef);
   my $volumeSteps = ReadingsVal($name, '.volumeSteps', 20);
   my $updateAfterSet = AttrVal($name, 'updateAfterSet', 1);
+  my $ip = InternalVal($name, 'IP', undef);
 
   if (defined($inputReading))
   {
@@ -272,11 +301,37 @@ sub SIRD_Set($$@) {
   }
   elsif ($cmd =~ /^(?:stop|play|pause|next|previous)$/)
   {
-    my $playCommands = AttrVal($name, 'playCommands', '0:stop,1:play,2:pause,3:next,4:previous');
-
-    if ($playCommands =~ /([0-9])\:$cmd/)
+    if (defined($hash->{helper}{PID_STREAM}) && defined($ip))
     {
-      SIRD_SendRequest($hash, 'SET', 'netRemote.play.control', $1, 0, \&SIRD_ParsePlay);
+      if ('stop' eq $cmd)
+      {
+        SIRD_DlnaStop($name, $ip, 1);
+      }
+      elsif ('play' eq $cmd)
+      {
+        SIRD_DlnaPlay($name, $ip, 1);
+      }
+      elsif ('pause' eq $cmd)
+      {
+        SIRD_DlnaPause($name, $ip, 1);
+      }
+      elsif ('next' eq $cmd)
+      {
+        SIRD_DlnaNext($name, $ip, 1);
+      }
+      elsif ('previous' eq $cmd)
+      {
+        SIRD_DlnaPrevious($name, $ip, 1);
+      }
+    }
+    else
+    {
+      my $playCommands = AttrVal($name, 'playCommands', '0:stop,1:play,2:pause,3:next,4:previous');
+
+      if ($playCommands =~ /([0-9])\:$cmd/)
+      {
+        SIRD_SendRequest($hash, 'SET', 'netRemote.play.control', $1, 0, \&SIRD_ParsePlay);
+      }
     }
   }
   elsif ('input' eq $cmd)
@@ -377,9 +432,48 @@ sub SIRD_Set($$@) {
 
     $input = $1 if ($inputReading =~ /(\d+):$input/);
 
-    SIRD_StartSpeak($hash, $text, $input, $ttsInput, $volumeSteps, $hash->{CL});
+    SIRD_StartSpeak($hash, $text, $input, $ttsInput, $volumeSteps);
+  }
+  elsif ('stream' eq $cmd)
+  {
+    my $streamInput = AttrVal($name, 'streamInput', 'dmr');
+    my $streamPath = AttrVal($name, 'streamPath', '/opt/fhem/www/');
+    my $streamPort = AttrVal($name, 'streamPort', 5000);
 
-    return undef;
+    if (('' ne $input) && ($streamInput eq $input))
+    {
+      $streamInput = '';
+    }
+    elsif ($inputReading =~ /(\d+):$streamInput/)
+    {
+      $streamInput = $1;
+    }
+    else
+    {
+      $streamInput = '';
+    }
+
+    $input = $1 if ($inputReading =~ /(\d+):$input/);
+
+    if ($arg =~ /^https?:\/\//i)
+    {
+      SIRD_StartStream($hash, $arg, $input, $streamInput);
+    }
+    elsif (-e $streamPath.$arg)
+    {
+      # is there any other way to get the local fhem ip?
+      my $socket = IO::Socket::INET->new(Proto    => 'udp',
+                                         PeerAddr => '198.41.0.4',
+                                         PeerPort => '53');
+      my $ip = $socket->sockhost;
+
+      SIRD_StartWebserver($hash, $streamPort, $streamPath, $arg);
+      SIRD_StartStream($hash, 'http://'.$ip.':'.$streamPort.'/'.$arg, $input, $streamInput);
+    }
+    else
+    {
+      return 'Path not found! ('.$streamPath.$arg.')';
+    }
   }
   elsif ('statusRequest' eq $cmd)
   {
@@ -394,7 +488,7 @@ sub SIRD_Set($$@) {
   {
     my $list = 'login:noArg on:noArg off:noArg mute:on,off,toggle shuffle:on,off repeat:on,off stop:noArg play:noArg pause:noArg '.
                'next:noArg previous:noArg presetUp:noArg presetDown:noArg volumeUp:noArg volumeDown:noArg '.
-               'on-for-timer off-for-timer on-till off-till on-till-overnight off-till-overnight intervals toggle:noArg speak '.
+               'on-for-timer off-for-timer on-till off-till on-till-overnight off-till-overnight intervals toggle:noArg speak stream '.
                'volume:slider,0,1,100 volumeStraight:slider,0,1,'.$volumeSteps.' statusRequest:noArg input:'.$inputs.' '.$presetsAll;
 
     return 'Unknown argument '.$cmd.', choose one of '.$list;
@@ -495,6 +589,39 @@ sub SIRD_CreateLink($$$$$)
 }
 
 
+sub SIRD_SplitSpeak($)
+{
+  my $text = shift;
+  my $index;
+
+  if (length($text) > 100)
+  {
+    $index = rindex($text, '.', 100);
+
+    if (($index < 0) || ((length($text) - $index) > 100))
+    {
+      $index = rindex($text, ',', 100);
+
+      if (($index < 0) || ((length($text) - $index) > 100))
+      {
+        $index = rindex($text, ' ', 100);
+
+        if (($index < 0) || ((length($text) - $index) > 100))
+        {
+          $index = 99;
+        }
+      }
+    }
+
+    return (substr($text, 0, $index + 1), substr($text, $index + 1));
+  }
+  else
+  {
+    return ($text, undef);
+  }
+}
+
+
 sub SIRD_SetNextTimer($$)
 {
   my ($hash, $timer) = @_;
@@ -548,16 +675,16 @@ sub SIRD_StartNavigation($$$;$)
   my $ip = InternalVal($name, 'IP', undef);
   my $pin = InternalVal($name, 'PIN', '1234');
 
-  if (exists($hash->{helper}{RUNNING_PID}))
+  if (exists($hash->{helper}{PID_NAVIGATION}))
   {
     Log3 $name, 3, $name.': Blocking call already running (navigation).';
 
-    SIRD_AbortNavigation($hash);
+    BlockingKill($hash->{helper}{PID_NAVIGATION}) if (defined($hash->{helper}{PID_NAVIGATION}));
   }
 
   $hash->{helper}{CL} = (defined($cl) ? $cl : $hash->{CL});
 
-  $hash->{helper}{RUNNING_PID} = BlockingCall('SIRD_DoNavigation', $name.'|'.$ip.'|'.$pin.'|'.$index.'|'.$wait.'|'.$maxNavigationItems, 'SIRD_EndNavigation', 60, 'SIRD_AbortNavigation', $hash);
+  $hash->{helper}{PID_NAVIGATION} = BlockingCall('SIRD_DoNavigation', $name.'|'.$ip.'|'.$pin.'|'.$index.'|'.$wait.'|'.$maxNavigationItems, 'SIRD_EndNavigation', 60, 'SIRD_AbortNavigation', $hash);
 }
 
 
@@ -733,7 +860,7 @@ sub SIRD_EndNavigation($)
 
   Log3 $name, 5, $name.': Blocking call finished to read navigation items.';
 
-  delete($hash->{helper}{RUNNING_PID});
+  delete($hash->{helper}{PID_NAVIGATION});
 }
 
 
@@ -742,223 +869,141 @@ sub SIRD_AbortNavigation($)
   my ($hash) = @_;
   my $name = $hash->{NAME};
 
-  delete($hash->{helper}{RUNNING_PID});
+  delete($hash->{helper}{PID_NAVIGATION});
 
   Log3 $name, 3, $name.': Blocking call aborted (navigation).';
 }
 
 
-sub SIRD_StartSpeak($$$$$;$)
+sub SIRD_StartSpeak($$$$$)
 {
-  my ($hash, $text, $input, $ttsInput, $volumeSteps, $cl) = @_;
+  my ($hash, $text, $input, $ttsInput, $volumeSteps) = @_;
   my $name = $hash->{NAME};
-  my $ip = InternalVal($name, 'IP', undef);
+  my $ip = InternalVal($name, 'IP', '127.0.0.1');
   my $pin = InternalVal($name, 'PIN', '1234');
   my $language = AttrVal($name, 'ttsLanguage', 'de');
   # PowerOn,LoadStream,SetVolumeTTS,SetVolumeNormal,SetInput,PowerOff
-  my $ttsWaitTimes = AttrVal($name, 'ttsWaitTimes', '0:2:0:2:0:0');
+  my $ttsWaitTimes = AttrVal($name, 'ttsWaitTimes', '0:0:1:2:0:0');
+  my $ttsJinglePath = AttrVal($name, 'ttsJinglePath', '');
   my $power = ReadingsVal($name, 'power', 'on');
-  my $ttsVolume = AttrVal($name, 'ttsVolume', 25);
+  my $ttsVolume = AttrVal($name, 'ttsVolume', -1);
   my $volume = ReadingsVal($name, 'volume', 25);
   my $volumeStraight = ReadingsVal($name, 'volumeStraight', int($volume / (100 / $volumeSteps)));
 
-  if (exists($hash->{helper}{RUNNING_PID1}))
+  if (exists($hash->{helper}{PID_SPEAK}))
   {
     Log3 $name, 3, $name.': Blocking call already running (speak).';
 
-    SIRD_AbortSpeak($hash);
+    BlockingKill($hash->{helper}{PID_SPEAK}) if (defined($hash->{helper}{PID_SPEAK}));
   }
 
-  if (length($text) > 100)
+  if (($text =~ /\|[^\|]+\|/) && (length($text) > 100))
   {
     Log3 $name, 3, $name.': Too many chars for speak (more than 100).';
   }
+  elsif (($text !~ /\|[^\|]+\|/) && (length($text) > 200))
+  {
+    Log3 $name, 3, $name.': Too many chars for speak (more than 200).';
+  }
 
-  $hash->{helper}{CL} = (defined($cl) ? $cl : $hash->{CL});
   $hash->{helper}{suspendUpdate} = 1;
   @SIRD_queue = ();
-  $hash->{helper}{RUNNING_PID1} = BlockingCall('SIRD_DoSpeak', $name.'|'.$ip.'|'.$pin.'|'.$text.'|'.$language.'|'.$input.'|'.$ttsInput.'|'.$volume.'|'.$ttsVolume.'|'.$volumeStraight.'|'.$volumeSteps.'|'.$power.'|'.$ttsWaitTimes, 'SIRD_EndSpeak', 120, 'SIRD_AbortSpeak', $hash);
+  $hash->{helper}{PID_SPEAK} = BlockingCall('SIRD_DoSpeak', $name.'|'.$ip.'|'.$pin.'|'.$text.'|'.$ttsJinglePath.'|'.$language.'|'.$input.'|'.$ttsInput.'|'.$volume.'|'.$ttsVolume.'|'.$volumeStraight.'|'.$volumeSteps.'|'.$power.'|'.$ttsWaitTimes, 'SIRD_EndSpeak', 120, 'SIRD_AbortSpeak', $hash);
 }
 
 
 sub SIRD_DoSpeak(@)
 {
   my ($string) = @_;
-  my ($name, $ip, $pin, $text, $language, $input, $ttsInput, $volume, $ttsVolume, $volumeStraight, $volumeSteps, $power, $ttsWaitTimes) = split("\\|", $string);
+  my ($name, $ip, $pin, $text, $ttsJinglePath, $language, $input, $ttsInput, $volume, $ttsVolume, $volumeStraight, $volumeSteps, $power, $ttsWaitTimes) = split("\\|", $string);
   my ($ttsWait1, $ttsWait2, $ttsWait3, $ttsWait4, $ttsWait5, $ttsWait6) = split("\\:", $ttsWaitTimes);
-  my $param;
-  my $err;
-  my $data;
-  my $xml;
-  my $retryCounter;
+  my $startTime;
+  my $ttsJingleFile = '';
+  my $urlA;
+  my $urlB = undef;
+
+  Log3 $name, 5, $name.': Blocking call running to speak.';
 
   eval { $text = decode_base64($text) };
 
-  my $uri_text = uri_escape($text);
-  my $url = 'http://translate.google.com/translate_tts?ie=UTF-8&tl='.$language.'&client=tw-ob&q='.$uri_text;
+  if ($text =~ /\|([^\|]+)\|/)
+  {
+    $ttsJingleFile = $1;
 
-  $url =~ s/\&/\&amp\;/g;
+    $text =~ s/\|[^\|]+\|//;
+  }
 
-  Log3 $name, 5, $name.': Blocking call running to speak.';
+  if ('' ne $ttsJingleFile)
+  {
+    $urlA = 'http://translate.google.com/translate_tts?ie=UTF-8&tl='.$language.'&client=tw-ob&q='.uri_escape($text);
+    $urlA =~ s/\&/\&amp\;/g;
+  }
+  else
+  {
+    my ($uri_textA, $uri_textB) = SIRD_SplitSpeak($text);
+
+    $urlA = 'http://translate.google.com/translate_tts?ie=UTF-8&tl='.$language.'&client=tw-ob&q='.uri_escape($uri_textA);
+    $urlA =~ s/\&/\&amp\;/g;
+
+    if (defined($uri_textB))
+    {
+      $urlB = 'http://translate.google.com/translate_tts?ie=UTF-8&tl='.$language.'&client=tw-ob&q='.uri_escape($uri_textB);
+      $urlB =~ s/\&/\&amp\;/g;
+    }
+  }
+
+  if ('off' eq $power)
+  {
+    # mute before poweron
+    GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.audio.mute?pin='.$pin.'&value=1', 5, '', 1, 5);
+
+    SIRD_PowerOn($name, $ip, $pin);
+
+    sleep($ttsWait1) if ($ttsWait1 > 0);
+  }
 
   if ('' ne $ttsInput)
   {
     Log3 $name, 5, $name.': start switch to dmr.';
 
-    $data = GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.mode?pin='.$pin.'&value='.$ttsInput, 5, '', 1, 5);
+    SIRD_SwitchInput($name, $ip, $pin, $ttsInput);
   }
 
-  if ('off' eq $power)
+  SIRD_DlnaStop($name, $ip);
+
+  if ('' ne $ttsJingleFile)
   {
-    Log3 $name, 5, $name.': start power on.';
-
-    GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.power?pin='.$pin.'&value=1', 5, '', 1, 5);
-    if ($data && ($data =~ /fsapiResponse/))
-    {
-      eval {$xml = xmlin($data, keeproot => 0);};
-
-      if (!$@ && ('FS_OK' eq $xml->{status}))
-      {
-        $retryCounter = 0;
-
-        do
-        {
-          $data = GetFileFromURL('http://'.$ip.':80/fsapi/GET/netRemote.sys.power?pin='.$pin, 5, '', 1, 5);
-          if ($data && ($data =~ /fsapiResponse/))
-          {
-            eval {$xml = xmlin($data, keeproot => 0);};
-
-            if (!$@ && ('FS_OK' eq $xml->{status}))
-            {
-              if (1 == $xml->{value}->{u8})
-              {
-                Log3 $name, 5, $name.': power on successfully completed. ('.$retryCounter.')';
-
-                $retryCounter = 10;
-              }
-            }
-          }
-
-          $retryCounter++;
-        } while ($retryCounter < 10);
-      }
-    }
-
-    sleep($ttsWait1) if ($ttsWait1 > 0);
-  }
-
-  $param = {
-              url        => 'http://'.$ip.':8080/AVTransport/control',
-              timeout    => 10,
-              header     => { 'Content-Type' => 'text/xml; charset=utf-8',
-                              'SOAPAction' => '"urn:schemas-upnp-org:service:AVTransport:1#Stop"' },
-              data       => '<?xml version="1.0" encoding="utf-8"?>'.
-                            '<s:Envelope s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/" xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">'.
-                            '<s:Body><u:Stop xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'.
-                            '<InstanceID>0</InstanceID></u:Stop></s:Body></s:Envelope>',
-              #loglevel   => 3,
-              method     => 'POST'
-           };
-
-  ($err, $data) = HttpUtils_BlockingGet($param);
-
-  if ('' ne $err)
-  {
-    Log3 $name, 3, $name.': Something went wrong by setting Stop. ('.$err.')';
+    SIRD_DlnaSetAVTransportURI($name, $ip, $ttsJinglePath.$ttsJingleFile);
+    SIRD_DlnaSetNextAVTransportURI($name, $ip, $urlA);
   }
   else
   {
-    Log3 $name, 5, $name.': '.Dumper($data);
+    SIRD_DlnaSetAVTransportURI($name, $ip, $urlA);
+    SIRD_DlnaSetNextAVTransportURI($name, $ip, $urlB) if (defined($urlB));
   }
 
-  $param = {
-              url        => 'http://'.$ip.':8080/AVTransport/control',
-              timeout    => 10,
-              header     => { 'Content-Type' => 'text/xml; charset=utf-8',
-                              'SOAPAction' => '"urn:schemas-upnp-org:service:AVTransport:1#SetAVTransportURI"' },
-              data       => '<?xml version="1.0" encoding="utf-8"?>'.
-                            '<s:Envelope s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/" xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">'.
-                            '<s:Body><u:SetAVTransportURI xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'.
-                            '<InstanceID>0</InstanceID><CurrentURI>'.$url.'</CurrentURI><CurrentURIMetaData>'.
-                            '</CurrentURIMetaData></u:SetAVTransportURI></s:Body></s:Envelope>',
-              #loglevel   => 3,
-              method     => 'POST'
-            };
-
-  ($err, $data) = HttpUtils_BlockingGet($param);
-
-  if ('' ne $err)
-  {
-    Log3 $name, 3, $name.': Something went wrong by setting AVTransportURI. ('.$err.')';
-
-    return $name;
-  }
-  else
-  {
-    Log3 $name, 5, $name.': '.Dumper($param);
-    Log3 $name, 5, $name.': '.Dumper($data);
-  }
+  $startTime = time();
+  while (((time() - $startTime) < 5) && ('STOPPED' ne SIRD_DlnaGetTransportInfo($name, $ip))) {};
 
   sleep($ttsWait2) if ($ttsWait2 > 0);
 
-  if ($volume != $ttsVolume)
+  if (($volume != $ttsVolume) && ($ttsVolume >= 0))
   {
     GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.audio.volume?pin='.$pin.'&value='.int($ttsVolume / (100 / $volumeSteps)), 5, '', 1, 5);
-
-    sleep($ttsWait3) if ($ttsWait3 > 0);
-  }
-
-  $param = {
-              url        => 'http://'.$ip.':8080/AVTransport/control',
-              timeout    => 10,
-              header     => { 'Content-Type' => 'text/xml; charset=utf-8',
-                              'SOAPAction' => '"urn:schemas-upnp-org:service:AVTransport:1#Play"' },
-              data       => '<?xml version="1.0" encoding="utf-8"?>'.
-                            '<s:Envelope s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/" xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">'.
-                            '<s:Body><u:Play xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'.
-                            '<InstanceID>0</InstanceID><Speed>1</Speed></u:Play></s:Body></s:Envelope>',
-              #loglevel   => 3,
-              method     => 'POST'
-           };
-
-  ($err, $data) = HttpUtils_BlockingGet($param);
-
-  if ('' ne $err)
-  {
-    Log3 $name, 3, $name.': Something went wrong by setting Play. ('.$err.')';
   }
   else
   {
-    Log3 $name, 5, $name.': '.Dumper($data);
+    SIRD_UnMute($name, $ip, $pin);
   }
 
-  $retryCounter = 0;
-  do
-  {
-    sleep(2);
+  sleep($ttsWait3) if ($ttsWait3 > 0);
 
-    $data = GetFileFromURL('http://'.$ip.':80/fsapi/GET/netRemote.play.status?pin='.$pin, 5, '', 1, 5);
-    if ($data && ($data =~ /fsapiResponse/))
-    {
-      eval {$xml = xmlin($data, keeproot => 0);};
+  SIRD_DlnaPlay($name, $ip);
 
-      if (!$@ && ('FS_OK' eq $xml->{status}))
-      {
-        #Log3 $name, 3, $name.': '.Dumper($xml);
+  $startTime = time();
+  while (((time() - $startTime) < 120) && ('STOPPED' ne SIRD_DlnaGetTransportInfo($name, $ip))) {};
 
-        if (0 == $xml->{value}->{u8})
-        {
-          Log3 $name, 5, $name.': speak command completed. ('.$retryCounter.')';
-
-          $retryCounter = 60;
-        }
-      }
-    }
-
-    $retryCounter++;
-  } while ($retryCounter < 60);
-
-  if ($volume != $ttsVolume)
+  if (($volume != $ttsVolume) && ($ttsVolume >= 0))
   {
     GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.audio.volume?pin='.$pin.'&value='.int($volumeStraight), 5, '', 1, 5);
 
@@ -992,7 +1037,7 @@ sub SIRD_EndSpeak($)
 
   $hash->{helper}{suspendUpdate} = 0;
 
-  delete($hash->{helper}{RUNNING_PID1});
+  delete($hash->{helper}{PID_SPEAK});
 }
 
 
@@ -1003,9 +1048,172 @@ sub SIRD_AbortSpeak($)
 
   $hash->{helper}{suspendUpdate} = 0;
 
-  delete($hash->{helper}{RUNNING_PID1});
+  delete($hash->{helper}{PID_SPEAK});
 
   Log3 $name, 3, $name.': Blocking call aborted (speak).';
+}
+
+
+sub SIRD_StartStream($$$$)
+{
+  my ($hash, $stream, $input, $streamInput) = @_;
+  my $name = $hash->{NAME};
+  my $ip = InternalVal($name, 'IP', '127.0.0.1');
+  my $pin = InternalVal($name, 'PIN', '1234');
+  # PowerOn,LoadStream,SetInput,PowerOff
+  my $streamWaitTimes = AttrVal($name, 'streamWaitTimes', '0:1:0:0');
+  my $power = ReadingsVal($name, 'power', 'on');
+
+  if (exists($hash->{helper}{PID_STREAM}))
+  {
+    Log3 $name, 3, $name.': Blocking call already running (stream).';
+
+    BlockingKill($hash->{helper}{PID_STREAM}) if (defined($hash->{helper}{PID_STREAM}));
+  }
+
+  $hash->{helper}{PID_STREAM} = BlockingCall('SIRD_DoStream', $name.'|'.$ip.'|'.$pin.'|'.$stream.'|'.$input.'|'.$streamInput.'|'.$power.'|'.$streamWaitTimes, 'SIRD_EndStream');
+}
+
+
+sub SIRD_DoStream(@)
+{
+  my ($string) = @_;
+  my ($name, $ip, $pin, $stream, $input, $streamInput, $power, $streamWaitTimes) = split("\\|", $string);
+  my ($streamWait1, $streamWait2, $streamWait3, $streamWait4) = split("\\:", $streamWaitTimes);
+  my $startTime;
+
+  Log3 $name, 5, $name.': Blocking call running to stream.';
+
+  if ('off' eq $power)
+  {
+    # mute before poweron
+    GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.audio.mute?pin='.$pin.'&value=1', 5, '', 1, 5);
+
+    SIRD_PowerOn($name, $ip, $pin);
+
+    sleep($streamWait1) if ($streamWait1 > 0);
+  }
+
+  if ('' ne $streamInput)
+  {
+    Log3 $name, 5, $name.': start switch to dmr.';
+
+    SIRD_SwitchInput($name, $ip, $pin, $streamInput);
+  }
+
+  SIRD_DlnaStop($name, $ip);
+
+  SIRD_DlnaSetAVTransportURI($name, $ip, $stream);
+
+  $startTime = time();
+  while (((time() - $startTime) < 5) && ('STOPPED' ne SIRD_DlnaGetTransportInfo($name, $ip))) {};
+
+  if ('off' eq $power)
+  {
+    SIRD_UnMute($name, $ip, $pin);
+  }
+
+  sleep($streamWait2) if ($streamWait2 > 0);
+
+  SIRD_DlnaPlay($name, $ip);
+
+  while ('STOPPED' ne SIRD_DlnaGetTransportInfo($name, $ip)) {};
+
+  if ('' ne $streamInput)
+  {
+    GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.mode?pin='.$pin.'&value='.$input, 5, '', 1, 5);
+
+    sleep($streamWait3) if ($streamWait3 > 0);
+  }
+
+  if ('off' eq $power)
+  {
+    GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.power?pin='.$pin.'&value=0', 5, '', 1, 5);
+
+    sleep($streamWait4) if ($streamWait4 > 0);
+  }
+
+  return $name;
+}
+
+
+sub SIRD_EndStream($)
+{
+  my ($name) = @_;
+  my $hash = $defs{$name};
+
+  BlockingKill($hash->{helper}{PID_WEBSERVER}) if (defined($hash->{helper}{PID_WEBSERVER}));
+  delete($hash->{helper}{PID_WEBSERVER});
+  delete($hash->{helper}{PID_STREAM});
+
+  Log3 $name, 5, $name.': Blocking call finished to stream.';
+}
+
+
+sub SIRD_AbortStream($)
+{
+  my ($hash) = @_;
+  my $name = $hash->{NAME};
+
+  BlockingKill($hash->{helper}{PID_WEBSERVER}) if (defined($hash->{helper}{PID_WEBSERVER}));
+  delete($hash->{helper}{PID_WEBSERVER});
+  delete($hash->{helper}{PID_STREAM});
+
+  Log3 $name, 3, $name.': Blocking call aborted (stream).';
+}
+
+
+sub SIRD_StartWebserver($$$$)
+{
+  my ($hash, $port, $path, $file) = @_;
+  my $name = $hash->{NAME};
+
+  if (exists($hash->{helper}{PID_WEBSERVER}))
+  {
+    Log3 $name, 3, $name.': Blocking call already running (webserver).';
+
+    BlockingKill($hash->{helper}{PID_WEBSERVER}) if (defined($hash->{helper}{PID_WEBSERVER}));
+  }
+
+  $hash->{helper}{PID_WEBSERVER} = BlockingCall('SIRD_DoWebserver', $name.'|'.$port.'|'.$path.'|'.$file);
+}
+
+
+sub SIRD_DoWebserver(@)
+{
+  my ($string) = @_;
+  my ($name, $port, $path, $file) = split("\\|", $string);
+
+  Log3 $name, 5, $name.': Blocking call running: webserver.';
+
+  my $daemon = HTTP::Daemon->new(LocalPort => $port, ReuseAddr => 1, Timeout => 300) or return $name;
+
+  while (my $client = $daemon->accept)
+  {
+    while (my $request = $client->get_request)
+    {
+      Log3 $name, 5, $name.': Webserver request: '.Dumper($request);
+
+      if ('HEAD' eq $request->method)
+      {
+        $client->send_header('Content-Type', 'audio/mpeg');
+        $client->send_response(200, 'OK');
+      }
+
+      if ('GET' eq $request->method)
+      {
+        $client->send_file_response($path.$file);
+
+        Log3 $name, 5, $name.': Webserver send: '.$path.$file;
+      }
+    }
+
+    $client->close;
+
+    Log3 $name, 5, $name.': Webserver closed';
+  }
+
+  return $name;
 }
 
 
@@ -2104,7 +2312,7 @@ sub SIRD_ParseDeviceInfo($$$)
 
   if ('' ne $err)
   {
-    Log3 $name, 5, $name.': Error while requesting '.$param->{url}.' - '.$err;
+    Log3 $name, 3, $name.': Error while requesting '.$param->{url}.' - '.$err;
   }
   elsif ('' ne $data)
   {
@@ -2114,13 +2322,513 @@ sub SIRD_ParseDeviceInfo($$$)
 
     if (!$@)
     {
-      $hash->{MODEL} = encode_utf8(!ref($xml->{device}->{modelName}) ? $xml->{device}->{modelName} : '');
+      $hash->{MODEL} = encode_utf8(!ref($xml->{device}->{manufacturer}) && ('' ne $xml->{device}->{manufacturer}) ? $xml->{device}->{manufacturer}.' ' : '').
+                       encode_utf8(!ref($xml->{device}->{modelName}) ? $xml->{device}->{modelName} : '');
       $hash->{UDN} = encode_utf8(!ref($xml->{device}->{UDN}) ? $xml->{device}->{UDN} : '');
     }
     else
     {
       Log3 $name, 3, $name.': DeviceInfo failed.';
     }
+  }
+}
+
+
+sub SIRD_ParseDlna($$$)
+{
+  my ($param, $err, $data) = @_;
+  my $hash = $param->{hash};
+  my $name = $hash->{NAME};
+  my $xml;
+
+  if ('' ne $err)
+  {
+    Log3 $name, 3, $name.': Something went wrong by setting '.$param->{cmd}.' (Dlna). ('.$err.')';
+  }
+  elsif ('' ne $data)
+  {
+    Log3 $name, 5, $name.': Dlna command '.$param->{cmd}." returned:\n".$data;
+
+    #eval {$xml = xmlin($data, keeproot => 0);};
+
+    #if (!$@)
+    #{
+
+    #}
+  }
+}
+
+
+sub SIRD_SwitchInput($$$$)
+{
+  my ($name, $ip, $pin, $streamInput) = @_;
+  my $data;
+  my $xml;
+  my $startTime;
+
+  Log3 $name, 5, $name.': start switch to input.';
+
+  $data = GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.mode?pin='.$pin.'&value='.$streamInput, 5, '', 1, 5);
+  if ($data && ($data =~ /fsapiResponse/))
+  {
+    eval {$xml = xmlin($data, keeproot => 0);};
+
+    if (!$@ && ('FS_OK' eq $xml->{status}))
+    {
+      $startTime = time();
+
+      do
+      {
+        $data = GetFileFromURL('http://'.$ip.':80/fsapi/GET/netRemote.sys.mode?pin='.$pin, 5, '', 1, 5);
+        if ($data && ($data =~ /fsapiResponse/))
+        {
+          eval {$xml = xmlin($data, keeproot => 0);};
+
+          if (!$@ && ('FS_OK' eq $xml->{status}))
+          {
+            if ($streamInput == $xml->{value}->{u32})
+            {
+              Log3 $name, 5, $name.': switch to input successfully completed.';
+
+              $startTime -= 100;
+            }
+          }
+        }
+      } while (((time() - $startTime) < 5));
+    }
+  }
+}
+
+
+sub SIRD_PowerOn($$$)
+{
+  my ($name, $ip, $pin) = @_;
+  my $data;
+  my $xml;
+  my $startTime;
+
+  Log3 $name, 5, $name.': start power on.';
+
+  $data = GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.power?pin='.$pin.'&value=1', 5, '', 1, 5);
+  if ($data && ($data =~ /fsapiResponse/))
+  {
+    eval {$xml = xmlin($data, keeproot => 0);};
+
+    if (!$@ && ('FS_OK' eq $xml->{status}))
+    {
+      $startTime = time();
+
+      do
+      {
+        $data = GetFileFromURL('http://'.$ip.':80/fsapi/GET/netRemote.sys.power?pin='.$pin, 5, '', 1, 5);
+        if ($data && ($data =~ /fsapiResponse/))
+        {
+          eval {$xml = xmlin($data, keeproot => 0);};
+
+          if (!$@ && ('FS_OK' eq $xml->{status}))
+          {
+            if (1 == $xml->{value}->{u8})
+            {
+              Log3 $name, 5, $name.': power on successfully completed.';
+
+              $startTime -= 100;
+            }
+          }
+        }
+      } while (((time() - $startTime) < 15));
+    }
+  }
+}
+
+
+sub SIRD_UnMute($$$)
+{
+  my ($name, $ip, $pin) = @_;
+  my $data;
+  my $xml;
+  my $startTime;
+
+  Log3 $name, 5, $name.': start unmute.';
+
+  $data = GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.audio.mute?pin='.$pin.'&value=0', 5, '', 1, 5);
+  if ($data && ($data =~ /fsapiResponse/))
+  {
+    eval {$xml = xmlin($data, keeproot => 0);};
+
+    if (!$@ && ('FS_OK' eq $xml->{status}))
+    {
+      $startTime = time();
+
+      do
+      {
+        $data = GetFileFromURL('http://'.$ip.':80/fsapi/GET/netRemote.sys.audio.mute?pin='.$pin, 5, '', 1, 5);
+        if ($data && ($data =~ /fsapiResponse/))
+        {
+          eval {$xml = xmlin($data, keeproot => 0);};
+
+          if (!$@ && ('FS_OK' eq $xml->{status}))
+          {
+            if (0 == $xml->{value}->{u8})
+            {
+              Log3 $name, 5, $name.': unmute successfully completed.';
+
+              $startTime -= 100;
+            }
+          }
+        }
+      } while (((time() - $startTime) < 5));
+    }
+  }
+}
+
+
+sub SIRD_DlnaPlay($$;$)
+{
+  my ($name, $ip, $isNonBlocking) = @_;
+  my $hash = $defs{$name};
+  my $param = {
+                url        => 'http://'.$ip.':8080/AVTransport/control',
+                timeout    => 10,
+                header     => { 'Content-Type' => 'text/xml; charset="utf-8"',
+                                'SOAPAction' => '"urn:schemas-upnp-org:service:AVTransport:1#Play"' },
+                data       => '<?xml version="1.0" encoding="utf-8"?>'.
+                              '<s:Envelope s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/" xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">'.
+                              '<s:Body><u:Play xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'.
+                              '<InstanceID>0</InstanceID><Speed>1</Speed></u:Play></s:Body></s:Envelope>',
+                #loglevel   => 3,
+                method     => 'POST'
+              };
+
+  if (defined($isNonBlocking))
+  {
+    $param->{hash} = $hash;
+    $param->{cmd} = 'Play';
+    $param->{callback} = \&SIRD_ParseDlna;
+
+    HttpUtils_NonblockingGet($param);
+  }
+  else
+  {
+    my ($err, $data) = HttpUtils_BlockingGet($param);
+
+    if ('' ne $err)
+    {
+      Log3 $name, 3, $name.': Something went wrong by setting Play. ('.$err.')';
+    }
+    else
+    {
+      Log3 $name, 5, $name.': DLNA Play '.Dumper($data);
+    }
+  }
+}
+
+
+sub SIRD_DlnaStop($$;$)
+{
+  my ($name, $ip, $isNonBlocking) = @_;
+  my $hash = $defs{$name};
+  my $param = {
+                url        => 'http://'.$ip.':8080/AVTransport/control',
+                timeout    => 10,
+                header     => { 'Content-Type' => 'text/xml; charset="utf-8"',
+                                'SOAPAction' => '"urn:schemas-upnp-org:service:AVTransport:1#Stop"' },
+                data       => '<?xml version="1.0" encoding="utf-8"?>'.
+                              '<s:Envelope s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/" xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">'.
+                              '<s:Body><u:Stop xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'.
+                              '<InstanceID>0</InstanceID></u:Stop></s:Body></s:Envelope>',
+                #loglevel   => 3,
+                method     => 'POST'
+              };
+
+  if (defined($isNonBlocking))
+  {
+    $param->{hash} = $hash;
+    $param->{cmd} = 'Stop';
+    $param->{callback} = \&SIRD_ParseDlna;
+
+    HttpUtils_NonblockingGet($param);
+  }
+  else
+  {
+    my ($err, $data) = HttpUtils_BlockingGet($param);
+
+    if ('' ne $err)
+    {
+      Log3 $name, 3, $name.': Something went wrong by setting Stop. ('.$err.')';
+    }
+    else
+    {
+      Log3 $name, 5, $name.': DLNA Stop '.Dumper($data);
+    }
+  }
+}
+
+
+sub SIRD_DlnaPause($$;$)
+{
+  my ($name, $ip, $isNonBlocking) = @_;
+  my $hash = $defs{$name};
+  my $param = {
+                url        => 'http://'.$ip.':8080/AVTransport/control',
+                timeout    => 10,
+                header     => { 'Content-Type' => 'text/xml; charset="utf-8"',
+                                'SOAPAction' => '"urn:schemas-upnp-org:service:AVTransport:1#Pause"' },
+                data       => '<?xml version="1.0" encoding="utf-8"?>'.
+                              '<s:Envelope s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/" xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">'.
+                              '<s:Body><u:Pause xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'.
+                              '<InstanceID>0</InstanceID></u:Pause></s:Body></s:Envelope>',
+                #loglevel   => 3,
+                method     => 'POST'
+              };
+
+  if (defined($isNonBlocking))
+  {
+    $param->{hash} = $hash;
+    $param->{cmd} = 'Pause';
+    $param->{callback} = \&SIRD_ParseDlna;
+
+    HttpUtils_NonblockingGet($param);
+  }
+  else
+  {
+    my ($err, $data) = HttpUtils_BlockingGet($param);
+
+    if ('' ne $err)
+    {
+      Log3 $name, 3, $name.': Something went wrong by setting Pause. ('.$err.')';
+    }
+    else
+    {
+      Log3 $name, 5, $name.': DLNA Pause '.Dumper($data);
+    }
+  }
+}
+
+
+sub SIRD_DlnaNext($$;$)
+{
+  my ($name, $ip, $isNonBlocking) = @_;
+  my $hash = $defs{$name};
+  my $param = {
+                url        => 'http://'.$ip.':8080/AVTransport/control',
+                timeout    => 10,
+                header     => { 'Content-Type' => 'text/xml; charset="utf-8"',
+                                'SOAPAction' => '"urn:schemas-upnp-org:service:AVTransport:1#Next"' },
+                data       => '<?xml version="1.0" encoding="utf-8"?>'.
+                              '<s:Envelope s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/" xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">'.
+                              '<s:Body><u:Next xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'.
+                              '<InstanceID>0</InstanceID></u:Next></s:Body></s:Envelope>',
+                #loglevel   => 3,
+                method     => 'POST'
+              };
+
+  if (defined($isNonBlocking))
+  {
+    $param->{hash} = $hash;
+    $param->{cmd} = 'Next';
+    $param->{callback} = \&SIRD_ParseDlna;
+
+    HttpUtils_NonblockingGet($param);
+  }
+  else
+  {
+    my ($err, $data) = HttpUtils_BlockingGet($param);
+
+    if ('' ne $err)
+    {
+      Log3 $name, 3, $name.': Something went wrong by setting Next. ('.$err.')';
+    }
+    else
+    {
+      Log3 $name, 5, $name.': DLNA Next '.Dumper($data);
+    }
+  }
+}
+
+
+sub SIRD_DlnaPrevious($$;$)
+{
+  my ($name, $ip, $isNonBlocking) = @_;
+  my $hash = $defs{$name};
+  my $param = {
+                url        => 'http://'.$ip.':8080/AVTransport/control',
+                timeout    => 10,
+                header     => { 'Content-Type' => 'text/xml; charset="utf-8"',
+                                'SOAPAction' => '"urn:schemas-upnp-org:service:AVTransport:1#Previous"' },
+                data       => '<?xml version="1.0" encoding="utf-8"?>'.
+                              '<s:Envelope s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/" xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">'.
+                              '<s:Body><u:Previous xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'.
+                              '<InstanceID>0</InstanceID></u:Previous></s:Body></s:Envelope>',
+                #loglevel   => 3,
+                method     => 'POST'
+              };
+
+  if (defined($isNonBlocking))
+  {
+    $param->{hash} = $hash;
+    $param->{cmd} = 'Previous';
+    $param->{callback} = \&SIRD_ParseDlna;
+
+    HttpUtils_NonblockingGet($param);
+  }
+  else
+  {
+    my ($err, $data) = HttpUtils_BlockingGet($param);
+
+    if ('' ne $err)
+    {
+      Log3 $name, 3, $name.': Something went wrong by setting Previous. ('.$err.')';
+    }
+    else
+    {
+      Log3 $name, 5, $name.': DLNA Previous '.Dumper($data);
+    }
+  }
+}
+
+
+sub SIRD_DlnaSetAVTransportURI($$$;$)
+{
+  my ($name, $ip, $stream, $isNonBlocking) = @_;
+  my $hash = $defs{$name};
+  my $param = {
+                url        => 'http://'.$ip.':8080/AVTransport/control',
+                timeout    => 10,
+                header     => { 'Content-Type' => 'text/xml; charset="utf-8"',
+                                'SOAPAction' => '"urn:schemas-upnp-org:service:AVTransport:1#SetAVTransportURI"' },
+                data       => '<?xml version="1.0" encoding="utf-8"?>'.
+                              '<s:Envelope s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/" xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">'.
+                              '<s:Body><u:SetAVTransportURI xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'.
+                              '<InstanceID>0</InstanceID><CurrentURI>'.$stream.'</CurrentURI><CurrentURIMetaData>'.
+                              '</CurrentURIMetaData></u:SetAVTransportURI></s:Body></s:Envelope>',
+                #loglevel   => 3,
+                method     => 'POST'
+              };
+
+  if (defined($isNonBlocking))
+  {
+    $param->{hash} = $hash;
+    $param->{cmd} = 'SetAVTransportURI';
+    $param->{callback} = \&SIRD_ParseDlna;
+
+    HttpUtils_NonblockingGet($param);
+  }
+  else
+  {
+    my ($err, $data) = HttpUtils_BlockingGet($param);
+
+    if ('' ne $err)
+    {
+      Log3 $name, 3, $name.': Something went wrong by setting AVTransportURI. ('.$err.')';
+
+      return $name;
+    }
+    else
+    {
+      Log3 $name, 5, $name.': DLNA SetAVTransportURI '.Dumper($param);
+      Log3 $name, 5, $name.': DLNA SetAVTransportURI '.Dumper($data);
+    }
+  }
+}
+
+
+sub SIRD_DlnaSetNextAVTransportURI($$$;$)
+{
+  my ($name, $ip, $stream, $isNonBlocking) = @_;
+  my $hash = $defs{$name};
+  my $param = {
+                url        => 'http://'.$ip.':8080/AVTransport/control',
+                timeout    => 10,
+                header     => { 'Content-Type' => 'text/xml; charset="utf-8"',
+                                'SOAPAction' => '"urn:schemas-upnp-org:service:AVTransport:1#SetNextAVTransportURI"' },
+                data       => '<?xml version="1.0" encoding="utf-8"?>'.
+                              '<s:Envelope s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/" xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">'.
+                              '<s:Body><u:SetNextAVTransportURI xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'.
+                              '<InstanceID>0</InstanceID><NextURI>'.$stream.'</NextURI><NextURIMetaData>'.
+                              '</NextURIMetaData></u:SetNextAVTransportURI></s:Body></s:Envelope>',
+                #loglevel   => 3,
+                method     => 'POST'
+              };
+
+  if (defined($isNonBlocking))
+  {
+    $param->{hash} = $hash;
+    $param->{cmd} = 'SetNextAVTransportURI';
+    $param->{callback} = \&SIRD_ParseDlna;
+
+    HttpUtils_NonblockingGet($param);
+  }
+  else
+  {
+    my ($err, $data) = HttpUtils_BlockingGet($param);
+
+    if ('' ne $err)
+    {
+      Log3 $name, 3, $name.': Something went wrong by setting NextAVTransportURI. ('.$err.')';
+
+      return $name;
+    }
+    else
+    {
+      Log3 $name, 5, $name.': DLNA SetNextAVTransportURI '.Dumper($param);
+      Log3 $name, 5, $name.': DLNA SetNextAVTransportURI '.Dumper($data);
+    }
+  }
+}
+
+
+sub SIRD_DlnaGetTransportInfo($$;$)
+{
+  my ($name, $ip, $isNonBlocking) = @_;
+  my $hash = $defs{$name};
+  my $param = {
+                url        => 'http://'.$ip.':8080/AVTransport/control',
+                timeout    => 10,
+                header     => { 'Content-Type' => 'text/xml; charset="utf-8"',
+                                'SOAPAction' => '"urn:schemas-upnp-org:service:AVTransport:1#GetTransportInfo"' },
+                data       => '<?xml version="1.0" encoding="utf-8"?>'.
+                              '<s:Envelope s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/" xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">'.
+                              '<s:Body><u:GetTransportInfo xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'.
+                              '<InstanceID>0</InstanceID></u:GetTransportInfo></s:Body></s:Envelope>',
+                #loglevel   => 3,
+                method     => 'POST'
+              };
+
+  if (defined($isNonBlocking))
+  {
+    $param->{hash} = $hash;
+    $param->{cmd} = 'GetTransportInfo';
+    $param->{callback} = \&SIRD_ParseDlna;
+
+    HttpUtils_NonblockingGet($param);
+  }
+  else
+  {
+    my ($err, $data) = HttpUtils_BlockingGet($param);
+
+    if ('' ne $err)
+    {
+      Log3 $name, 3, $name.': Something went wrong by getting TransportInfo. ('.$err.')';
+    }
+    else
+    {
+      Log3 $name, 5, $name.': DLNA GetTransportInfo '.Dumper($data);
+
+      if (($data =~ /<CurrentTransportStatus>OK<\/CurrentTransportStatus>/) &&
+          ($data =~ /<CurrentTransportState>([A-Z_]+)<\/CurrentTransportState>/))
+      {
+        if (('NO_MEDIA_PRESENT' eq $1) || ('STOPPED' eq $1))
+        {
+          return 'STOPPED';
+        }
+        else
+        {
+          return $1;
+        }
+      }
+    }
+
+    return 'STOPPED';
   }
 }
 
@@ -2178,7 +2886,8 @@ sub SIRD_ParseDeviceInfo($$$)
     <li>shuffle - on/off</li>
     <li>repeat - on/off</li>
     <li>statusRequest - update all readings</li>
-    <li>speak - text to speech for up to 100 chars</li>
+    <li>speak - text to speech for up to 200 chars if no jingle is used and up to 100 chars if a jingle is used (text is split by dot, comma or space after 100 chars). To play a jingle in front of the speak text, just enter a filename enclosed in ||. Be sure that ttsJinglePath contains a correct base url (example: |jingle.mp3| This is a test.)</li>
+    <li>stream - stream media files from a local directory or files located on a webserver or Dlna server</li>
     <br>
   </ul>
   <br><br>
@@ -2202,7 +2911,12 @@ sub SIRD_ParseDeviceInfo($$$)
     <li><b>ttsInput:</b> input for text to speech (default: dmr)<br></li>
     <li><b>ttsLanguage:</b> language setting for text to speech output (default: de)<br></li>
     <li><b>ttsVolume:</b> volume setting for text to speech output (default: 25)<br></li>
-    <li><b>ttsWaitTimes:</b> wait times for tts output (default: 0:2:0:2:0:0 = PowerOn:LoadStream:SetVolumeTTS:SetVolumeNormal:SetInput:PowerOff)<br></li>
+    <li><b>ttsWaitTimes:</b> wait times for tts output (default: 0:0:1:2:0:0 = PowerOn:LoadStream:SetVolumeTTS:SetVolumeNormal:SetInput:PowerOff)<br></li>
+    <li><b>ttsJinglePath:</b> path to mp3 files to be used as jingle before the speak output starts. Any mp3 located on a webserver or Dlna server can be used like http://192.168.1.100/. The filename must be part of the speak text enclosed in || like e.g. |jingle.mp3|.<br></li>
+    <li><b>streamInput:</b> input for stream output (default: dmr)<br></li>
+    <li><b>streamWaitTimes:</b> wait times for stream output (default: 0:1:0:0 = PowerOn,LoadStream,SetInput,PowerOff)<br></li>
+    <li><b>streamPath:</b> local path to stream media files from (default: /opt/fhem/www/)<br></li>
+    <li><b>streamPort:</b> port for webserver to stream local media files (default: 5000)<br></li>
     <li><b>updateAfterSet:</b> enable or disable the update of all readings after any set command was triggered (default: enabled)<br></li>
     <li><b>notifications:</b> Enable or disable notifications (default: disabled). It may be that you will get some readings faster if this feature is enabled (noticeable for big update cycles only).<br></li>
     <br>
