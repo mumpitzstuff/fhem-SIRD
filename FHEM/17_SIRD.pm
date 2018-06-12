@@ -45,7 +45,7 @@ sub SIRD_Initialize($)
                         'ttsInput '.
                         'ttsLanguage '.
                         'ttsVolume '.
-                        'ttsJingle '.
+                        'ttsJinglePath '.
                         'ttsWaitTimes '.
                         'streamInput '.
                         'streamWaitTimes '.
@@ -215,11 +215,11 @@ sub SIRD_Attr($$$$) {
         return 'ttsWaitTimes must be 6 numbers equal or greater than 0 joint by : (default: 0:2:0:2:0:0)';
       }
     }
-    elsif ('ttsJingle' eq $attribute)
+    elsif ('ttsJinglePath' eq $attribute)
     {
-      if (($value !~ /^https?:\/\//i) || (($value !~ /\.mp3$/i) && ($value !~ /\/$/)))
+      if (($value !~ /^https?:\/\//i) || ($value !~ /\/$/))
       {
-        return 'ttsJingle must start with http(s):// and end with .mp3 or /';
+        return 'ttsJinglePath must start with http(s):// and end with /';
       }
     }
     elsif ('compatibilityMode' eq $attribute)
@@ -461,6 +461,7 @@ sub SIRD_Set($$@) {
     }
     elsif (-e $streamPath.$arg)
     {
+      # is there any other way to get the local fhem ip?
       my $socket = IO::Socket::INET->new(Proto    => 'udp',
                                          PeerAddr => '198.41.0.4',
                                          PeerPort => '53');
@@ -882,8 +883,8 @@ sub SIRD_StartSpeak($$$$$)
   my $pin = InternalVal($name, 'PIN', '1234');
   my $language = AttrVal($name, 'ttsLanguage', 'de');
   # PowerOn,LoadStream,SetVolumeTTS,SetVolumeNormal,SetInput,PowerOff
-  my $ttsWaitTimes = AttrVal($name, 'ttsWaitTimes', '0:0:0:2:0:0');
-  my $ttsJingle = AttrVal($name, 'ttsJingle', '');
+  my $ttsWaitTimes = AttrVal($name, 'ttsWaitTimes', '0:0:1:2:0:0');
+  my $ttsJinglePath = AttrVal($name, 'ttsJinglePath', '');
   my $power = ReadingsVal($name, 'power', 'on');
   my $ttsVolume = AttrVal($name, 'ttsVolume', -1);
   my $volume = ReadingsVal($name, 'volume', 25);
@@ -896,28 +897,28 @@ sub SIRD_StartSpeak($$$$$)
     BlockingKill($hash->{helper}{PID_SPEAK}) if (defined($hash->{helper}{PID_SPEAK}));
   }
 
-  if (('' ne $ttsJingle) && (length($text) > 100))
+  if (($text =~ /\|[^\|]+\|/) && (length($text) > 100))
   {
     Log3 $name, 3, $name.': Too many chars for speak (more than 100).';
   }
-  elsif (('' eq $ttsJingle) && (length($text) > 200))
+  elsif (($text !~ /\|[^\|]+\|/) && (length($text) > 200))
   {
     Log3 $name, 3, $name.': Too many chars for speak (more than 200).';
   }
 
   $hash->{helper}{suspendUpdate} = 1;
   @SIRD_queue = ();
-  $hash->{helper}{PID_SPEAK} = BlockingCall('SIRD_DoSpeak', $name.'|'.$ip.'|'.$pin.'|'.$text.'|'.$ttsJingle.'|'.$language.'|'.$input.'|'.$ttsInput.'|'.$volume.'|'.$ttsVolume.'|'.$volumeStraight.'|'.$volumeSteps.'|'.$power.'|'.$ttsWaitTimes, 'SIRD_EndSpeak', 120, 'SIRD_AbortSpeak', $hash);
+  $hash->{helper}{PID_SPEAK} = BlockingCall('SIRD_DoSpeak', $name.'|'.$ip.'|'.$pin.'|'.$text.'|'.$ttsJinglePath.'|'.$language.'|'.$input.'|'.$ttsInput.'|'.$volume.'|'.$ttsVolume.'|'.$volumeStraight.'|'.$volumeSteps.'|'.$power.'|'.$ttsWaitTimes, 'SIRD_EndSpeak', 120, 'SIRD_AbortSpeak', $hash);
 }
 
 
 sub SIRD_DoSpeak(@)
 {
   my ($string) = @_;
-  my ($name, $ip, $pin, $text, $ttsJingle, $language, $input, $ttsInput, $volume, $ttsVolume, $volumeStraight, $volumeSteps, $power, $ttsWaitTimes) = split("\\|", $string);
+  my ($name, $ip, $pin, $text, $ttsJinglePath, $language, $input, $ttsInput, $volume, $ttsVolume, $volumeStraight, $volumeSteps, $power, $ttsWaitTimes) = split("\\|", $string);
   my ($ttsWait1, $ttsWait2, $ttsWait3, $ttsWait4, $ttsWait5, $ttsWait6) = split("\\:", $ttsWaitTimes);
   my $startTime;
-  my $jingleFile = '';
+  my $ttsJingleFile = '';
   my $urlA;
   my $urlB = undef;
 
@@ -927,12 +928,12 @@ sub SIRD_DoSpeak(@)
 
   if ($text =~ /\|([^\|]+)\|/)
   {
-    $jingleFile = $1;
+    $ttsJingleFile = $1;
 
     $text =~ s/\|[^\|]+\|//;
   }
 
-  if ('' ne $ttsJingle.$jingleFile)
+  if ('' ne $ttsJingleFile)
   {
     $urlA = 'http://translate.google.com/translate_tts?ie=UTF-8&tl='.$language.'&client=tw-ob&q='.uri_escape($text);
     $urlA =~ s/\&/\&amp\;/g;
@@ -951,25 +952,28 @@ sub SIRD_DoSpeak(@)
     }
   }
 
-  if ('' ne $ttsInput)
-  {
-    Log3 $name, 5, $name.': start switch to dmr.';
-
-    GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.mode?pin='.$pin.'&value='.$ttsInput, 5, '', 1, 5);
-  }
-
   if ('off' eq $power)
   {
+    # mute before poweron
+    GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.audio.mute?pin='.$pin.'&value=1', 5, '', 1, 5);
+
     SIRD_PowerOn($name, $ip, $pin);
 
     sleep($ttsWait1) if ($ttsWait1 > 0);
   }
 
+  if ('' ne $ttsInput)
+  {
+    Log3 $name, 5, $name.': start switch to dmr.';
+
+    SIRD_SwitchInput($name, $ip, $pin, $ttsInput);
+  }
+
   SIRD_DlnaStop($name, $ip);
 
-  if ('' ne $ttsJingle.$jingleFile)
+  if ('' ne $ttsJingleFile)
   {
-    SIRD_DlnaSetAVTransportURI($name, $ip, $ttsJingle.$jingleFile);
+    SIRD_DlnaSetAVTransportURI($name, $ip, $ttsJinglePath.$ttsJingleFile);
     SIRD_DlnaSetNextAVTransportURI($name, $ip, $urlA);
   }
   else
@@ -986,9 +990,13 @@ sub SIRD_DoSpeak(@)
   if (($volume != $ttsVolume) && ($ttsVolume >= 0))
   {
     GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.audio.volume?pin='.$pin.'&value='.int($ttsVolume / (100 / $volumeSteps)), 5, '', 1, 5);
-
-    sleep($ttsWait3) if ($ttsWait3 > 0);
   }
+  else
+  {
+    SIRD_UnMute($name, $ip, $pin);
+  }
+
+  sleep($ttsWait3) if ($ttsWait3 > 0);
 
   SIRD_DlnaPlay($name, $ip);
 
@@ -1053,7 +1061,7 @@ sub SIRD_StartStream($$$$)
   my $ip = InternalVal($name, 'IP', '127.0.0.1');
   my $pin = InternalVal($name, 'PIN', '1234');
   # PowerOn,LoadStream,SetInput,PowerOff
-  my $streamWaitTimes = AttrVal($name, 'streamWaitTimes', '0:0:0:0');
+  my $streamWaitTimes = AttrVal($name, 'streamWaitTimes', '0:1:0:0');
   my $power = ReadingsVal($name, 'power', 'on');
 
   if (exists($hash->{helper}{PID_STREAM}))
@@ -1076,18 +1084,21 @@ sub SIRD_DoStream(@)
 
   Log3 $name, 5, $name.': Blocking call running to stream.';
 
+  if ('off' eq $power)
+  {
+    # mute before poweron
+    GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.audio.mute?pin='.$pin.'&value=1', 5, '', 1, 5);
+
+    SIRD_PowerOn($name, $ip, $pin);
+
+    sleep($streamWait1) if ($streamWait1 > 0);
+  }
+
   if ('' ne $streamInput)
   {
     Log3 $name, 5, $name.': start switch to dmr.';
 
-    GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.mode?pin='.$pin.'&value='.$streamInput, 5, '', 1, 5);
-  }
-
-  if ('off' eq $power)
-  {
-    SIRD_PowerOn($name, $ip, $pin);
-
-    sleep($streamWait1) if ($streamWait1 > 0);
+    SIRD_SwitchInput($name, $ip, $pin, $streamInput);
   }
 
   SIRD_DlnaStop($name, $ip);
@@ -1096,6 +1107,11 @@ sub SIRD_DoStream(@)
 
   $startTime = time();
   while (((time() - $startTime) < 5) && ('STOPPED' ne SIRD_DlnaGetTransportInfo($name, $ip))) {};
+
+  if ('off' eq $power)
+  {
+    SIRD_UnMute($name, $ip, $pin);
+  }
 
   sleep($streamWait2) if ($streamWait2 > 0);
 
@@ -2343,6 +2359,47 @@ sub SIRD_ParseDlna($$$)
 }
 
 
+sub SIRD_SwitchInput($$$$)
+{
+  my ($name, $ip, $pin, $streamInput) = @_;
+  my $data;
+  my $xml;
+  my $startTime;
+
+  Log3 $name, 5, $name.': start switch to input.';
+
+  $data = GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.mode?pin='.$pin.'&value='.$streamInput, 5, '', 1, 5);
+  if ($data && ($data =~ /fsapiResponse/))
+  {
+    eval {$xml = xmlin($data, keeproot => 0);};
+
+    if (!$@ && ('FS_OK' eq $xml->{status}))
+    {
+      $startTime = time();
+
+      do
+      {
+        $data = GetFileFromURL('http://'.$ip.':80/fsapi/GET/netRemote.sys.mode?pin='.$pin, 5, '', 1, 5);
+        if ($data && ($data =~ /fsapiResponse/))
+        {
+          eval {$xml = xmlin($data, keeproot => 0);};
+
+          if (!$@ && ('FS_OK' eq $xml->{status}))
+          {
+            if ($streamInput == $xml->{value}->{u32})
+            {
+              Log3 $name, 5, $name.': switch to input successfully completed.';
+
+              $startTime -= 100;
+            }
+          }
+        }
+      } while (((time() - $startTime) < 5));
+    }
+  }
+}
+
+
 sub SIRD_PowerOn($$$)
 {
   my ($name, $ip, $pin) = @_;
@@ -2352,42 +2409,74 @@ sub SIRD_PowerOn($$$)
 
   Log3 $name, 5, $name.': start power on.';
 
-  $data = GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.audio.mute?pin='.$pin.'&value=1', 5, '', 1, 5);
+  $data = GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.power?pin='.$pin.'&value=1', 5, '', 1, 5);
   if ($data && ($data =~ /fsapiResponse/))
   {
     eval {$xml = xmlin($data, keeproot => 0);};
 
     if (!$@ && ('FS_OK' eq $xml->{status}))
     {
-      $data = GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.power?pin='.$pin.'&value=1', 5, '', 1, 5);
-      if ($data && ($data =~ /fsapiResponse/))
+      $startTime = time();
+
+      do
       {
-        eval {$xml = xmlin($data, keeproot => 0);};
-
-        if (!$@ && ('FS_OK' eq $xml->{status}))
+        $data = GetFileFromURL('http://'.$ip.':80/fsapi/GET/netRemote.sys.power?pin='.$pin, 5, '', 1, 5);
+        if ($data && ($data =~ /fsapiResponse/))
         {
-          $startTime = time();
+          eval {$xml = xmlin($data, keeproot => 0);};
 
-          do
+          if (!$@ && ('FS_OK' eq $xml->{status}))
           {
-            $data = GetFileFromURL('http://'.$ip.':80/fsapi/GET/netRemote.sys.power?pin='.$pin, 5, '', 1, 5);
-            if ($data && ($data =~ /fsapiResponse/))
+            if (1 == $xml->{value}->{u8})
             {
-              eval {$xml = xmlin($data, keeproot => 0);};
+              Log3 $name, 5, $name.': power on successfully completed.';
 
-              if (!$@ && ('FS_OK' eq $xml->{status}))
-              {
-                if (1 == $xml->{value}->{u8})
-                {
-                  Log3 $name, 5, $name.': power on successfully completed.';
-
-                  $startTime -= 100;
-                }
-              }
+              $startTime -= 100;
             }
-          } while (((time() - $startTime) < 15));
+          }
         }
-      }
+      } while (((time() - $startTime) < 15));
+    }
+  }
+}
+
+
+sub SIRD_UnMute($$$)
+{
+  my ($name, $ip, $pin) = @_;
+  my $data;
+  my $xml;
+  my $startTime;
+
+  Log3 $name, 5, $name.': start unmute.';
+
+  $data = GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.audio.mute?pin='.$pin.'&value=0', 5, '', 1, 5);
+  if ($data && ($data =~ /fsapiResponse/))
+  {
+    eval {$xml = xmlin($data, keeproot => 0);};
+
+    if (!$@ && ('FS_OK' eq $xml->{status}))
+    {
+      $startTime = time();
+
+      do
+      {
+        $data = GetFileFromURL('http://'.$ip.':80/fsapi/GET/netRemote.sys.audio.mute?pin='.$pin, 5, '', 1, 5);
+        if ($data && ($data =~ /fsapiResponse/))
+        {
+          eval {$xml = xmlin($data, keeproot => 0);};
+
+          if (!$@ && ('FS_OK' eq $xml->{status}))
+          {
+            if (0 == $xml->{value}->{u8})
+            {
+              Log3 $name, 5, $name.': unmute successfully completed.';
+
+              $startTime -= 100;
+            }
+          }
+        }
+      } while (((time() - $startTime) < 5));
     }
   }
 }
@@ -2797,7 +2886,7 @@ sub SIRD_DlnaGetTransportInfo($$;$)
     <li>shuffle - on/off</li>
     <li>repeat - on/off</li>
     <li>statusRequest - update all readings</li>
-    <li>speak - text to speech for up to 200 chars if ttsJingle is not used and up to 100 chars if ttsJingle is used (text is split by dot, comma or space)</li>
+    <li>speak - text to speech for up to 200 chars if no jingle is used and up to 100 chars if a jingle is used (text is split by dot, comma or space after 100 chars). To play a jingle in front of the speak text, just enter a filename enclosed in ||. Be sure that ttsJinglePath contains a correct base url (example: |jingle.mp3| This is a test.)</li>
     <li>stream - stream media files from a local directory or files located on a webserver or Dlna server</li>
     <br>
   </ul>
@@ -2822,10 +2911,10 @@ sub SIRD_DlnaGetTransportInfo($$;$)
     <li><b>ttsInput:</b> input for text to speech (default: dmr)<br></li>
     <li><b>ttsLanguage:</b> language setting for text to speech output (default: de)<br></li>
     <li><b>ttsVolume:</b> volume setting for text to speech output (default: 25)<br></li>
-    <li><b>ttsWaitTimes:</b> wait times for tts output (default: 0:0:0:2:0:0 = PowerOn:LoadStream:SetVolumeTTS:SetVolumeNormal:SetInput:PowerOff)<br></li>
-    <li><b>ttsJingle:</b> starts a jingle before the speak output starts. Any mp3 located on a webserver or Dlna server can be used like http://192.168.1.100/jingle.mp3.<br></li>
+    <li><b>ttsWaitTimes:</b> wait times for tts output (default: 0:0:1:2:0:0 = PowerOn:LoadStream:SetVolumeTTS:SetVolumeNormal:SetInput:PowerOff)<br></li>
+    <li><b>ttsJinglePath:</b> path to mp3 files to be used as jingle before the speak output starts. Any mp3 located on a webserver or Dlna server can be used like http://192.168.1.100/. The filename must be part of the speak text enclosed in || like e.g. |jingle.mp3|.<br></li>
     <li><b>streamInput:</b> input for stream output (default: dmr)<br></li>
-    <li><b>streamWaitTimes:</b> wait times for stream output (default: 0:0:0:0 = PowerOn,LoadStream,SetInput,PowerOff)<br></li>
+    <li><b>streamWaitTimes:</b> wait times for stream output (default: 0:1:0:0 = PowerOn,LoadStream,SetInput,PowerOff)<br></li>
     <li><b>streamPath:</b> local path to stream media files from (default: /opt/fhem/www/)<br></li>
     <li><b>streamPort:</b> port for webserver to stream local media files (default: 5000)<br></li>
     <li><b>updateAfterSet:</b> enable or disable the update of all readings after any set command was triggered (default: enabled)<br></li>
