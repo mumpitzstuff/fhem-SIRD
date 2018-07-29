@@ -12,7 +12,7 @@ use strict;
 use warnings;
 use utf8;
 use Encode qw(encode_utf8 decode_utf8);
-use XML::Bare qw(xmlin forcearray);
+use XML::Bare qw(forcearray);
 use URI::Escape;
 use HTTP::Daemon;
 use IO::Socket::INET;
@@ -77,7 +77,7 @@ sub SIRD_Define($$)
   $hash->{IP} = $ip;
   $hash->{PIN} = $pin;
   $hash->{INTERVAL} = $interval;
-  $hash->{VERSION} = '1.1.7';
+  $hash->{VERSION} = '1.1.8';
 
   delete($hash->{helper}{suspendUpdate});
   delete($hash->{helper}{notifications});
@@ -463,11 +463,13 @@ sub SIRD_Set($$@) {
     {
       # is there any other way to get the local fhem ip?
       my $socket = IO::Socket::INET->new(Proto    => 'udp',
-                                         PeerAddr => '198.41.0.4',
+                                         PeerAddr => '8.8.8.8',
                                          PeerPort => '53');
       my $ip = $socket->sockhost;
+      
+      close($socket);
 
-      SIRD_StartWebserver($hash, $streamPort, $streamPath, $arg);
+      SIRD_StartWebserver($hash, $streamPort, $streamPath);
       SIRD_StartStream($hash, 'http://'.$ip.':'.$streamPort.'/'.$arg, $input, $streamInput);
     }
     else
@@ -714,11 +716,11 @@ sub SIRD_DoNavigation(@)
     $data = GetFileFromURL('http://'.$ip.':80/fsapi/GET/netRemote.nav.numItems?pin='.$pin, 5, '', 1, 5);
     if ($data && ($data =~ /fsapiResponse/))
     {
-      eval {$xml = xmlin($data, keeproot => 0);};
+      eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
-      if (!$@ && ('FS_OK' eq $xml->{status}))
+      if (!$@ && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
       {
-        $numNav = ($xml->{value}->{s32} >= 1 ? $xml->{value}->{s32} - 1 : 1);
+        $numNav = ($xml->{fsapiResponse}{value}->{s32}{value} >= 1 ? $xml->{fsapiResponse}{value}->{s32}{value} - 1 : 1);
       }
       else
       {
@@ -739,34 +741,34 @@ sub SIRD_DoNavigation(@)
         {
           Log3 $name, 5, $name.': data = '.$data;
 
-          eval {$xml = xmlin($data, keeproot => 0);};
+          eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
-          if (!$@ && ('FS_OK' eq $xml->{status}))
+          if (!$@ && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
           {
             my $result = '';
 
-            foreach my $item (@{forcearray($xml->{item})})
+            foreach my $item (@{forcearray($xml->{fsapiResponse}{item})})
             {
-              if (exists($item->{key}) && exists($item->{field}) && (scalar(@{forcearray($item->{field})}) >= 1))
+              if (exists($item->{key}) && exists($item->{field}))
               {
                 my $type = undef;
                 my $name = undef;
 
                 foreach my $field (@{forcearray($item->{field})})
                 {
-                  if (exists($field->{name}) && ('name' eq $field->{name}) && !ref($field->{c8_array}))
+                  if (exists($field->{name}) && ('name' eq $field->{name}{value}) && exists($field->{c8_array}{value}))
                   {
-                    $_ = $field->{c8_array};
+                    $_ = $field->{c8_array}{value};
                     $_ =~ s/[^0-9a-zA-Z\.\-\_]+//g;
 
-                    $name = $item->{key}.':'.$_;
+                    $name = $item->{key}{value}.':'.$_;
 
-                    $lastNumNav = $item->{key};
+                    $lastNumNav = $item->{key}{value};
                   }
 
-                  if (exists($field->{name}) && ('type' eq $field->{name}))
+                  if (exists($field->{name}) && ('type' eq $field->{name}{value}))
                   {
-                    $type = $field->{u8};
+                    $type = $field->{u8}{value};
                   }
                 }
 
@@ -955,9 +957,8 @@ sub SIRD_DoSpeak(@)
   if ('off' eq $power)
   {
     # mute before poweron
-    GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.audio.mute?pin='.$pin.'&value=1', 5, '', 1, 5);
-
-    SIRD_PowerOn($name, $ip, $pin);
+    SIRD_SendRequestBlocking($name, $ip, $pin, 'netRemote.sys.audio.mute', 1, 'u8', 5);
+    SIRD_SendRequestBlocking($name, $ip, $pin, 'netRemote.sys.power', 1, 'u8', 15);
 
     sleep($ttsWait1) if ($ttsWait1 > 0);
   }
@@ -966,7 +967,7 @@ sub SIRD_DoSpeak(@)
   {
     Log3 $name, 5, $name.': start switch to dmr.';
 
-    SIRD_SwitchInput($name, $ip, $pin, $ttsInput);
+    SIRD_SendRequestBlocking($name, $ip, $pin, 'netRemote.sys.mode', $ttsInput, 'u32', 5);
   }
 
   SIRD_DlnaStop($name, $ip);
@@ -989,11 +990,11 @@ sub SIRD_DoSpeak(@)
 
   if (($volume != $ttsVolume) && ($ttsVolume >= 0))
   {
-    GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.audio.volume?pin='.$pin.'&value='.int($ttsVolume / (100 / $volumeSteps)), 5, '', 1, 5);
+    SIRD_SendRequestBlocking($name, $ip, $pin, 'netRemote.sys.audio.volume', int($ttsVolume / (100 / $volumeSteps)), 'u8', 5);
   }
   else
   {
-    SIRD_UnMute($name, $ip, $pin);
+    SIRD_SendRequestBlocking($name, $ip, $pin, 'netRemote.sys.audio.mute', 0, 'u8', 5);
   }
 
   sleep($ttsWait3) if ($ttsWait3 > 0);
@@ -1005,21 +1006,21 @@ sub SIRD_DoSpeak(@)
 
   if (($volume != $ttsVolume) && ($ttsVolume >= 0))
   {
-    GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.audio.volume?pin='.$pin.'&value='.int($volumeStraight), 5, '', 1, 5);
+    SIRD_SendRequestBlocking($name, $ip, $pin, 'netRemote.sys.audio.volume', int($volumeStraight), 'u8', 5);
 
     sleep($ttsWait4) if ($ttsWait4 > 0);
   }
 
   if ('' ne $ttsInput)
   {
-    GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.mode?pin='.$pin.'&value='.$input, 5, '', 1, 5);
+    SIRD_SendRequestBlocking($name, $ip, $pin, 'netRemote.sys.mode', $input, 'u32', 5);
 
     sleep($ttsWait5) if ($ttsWait5 > 0);
   }
 
   if ('off' eq $power)
   {
-    GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.power?pin='.$pin.'&value=0', 5, '', 1, 5);
+    SIRD_SendRequestBlocking($name, $ip, $pin, 'netRemote.sys.power', 0, 'u8', 5);
 
     sleep($ttsWait6) if ($ttsWait6 > 0);
   }
@@ -1087,9 +1088,8 @@ sub SIRD_DoStream(@)
   if ('off' eq $power)
   {
     # mute before poweron
-    GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.audio.mute?pin='.$pin.'&value=1', 5, '', 1, 5);
-
-    SIRD_PowerOn($name, $ip, $pin);
+    SIRD_SendRequestBlocking($name, $ip, $pin, 'netRemote.sys.audio.mute', 1, 'u8', 5);
+    SIRD_SendRequestBlocking($name, $ip, $pin, 'netRemote.sys.power', 1, 'u8', 15);
 
     sleep($streamWait1) if ($streamWait1 > 0);
   }
@@ -1098,7 +1098,7 @@ sub SIRD_DoStream(@)
   {
     Log3 $name, 5, $name.': start switch to dmr.';
 
-    SIRD_SwitchInput($name, $ip, $pin, $streamInput);
+    SIRD_SendRequestBlocking($name, $ip, $pin, 'netRemote.sys.mode', $streamInput, 'u32', 5);
   }
 
   SIRD_DlnaStop($name, $ip);
@@ -1110,7 +1110,7 @@ sub SIRD_DoStream(@)
 
   if ('off' eq $power)
   {
-    SIRD_UnMute($name, $ip, $pin);
+    SIRD_SendRequestBlocking($name, $ip, $pin, 'netRemote.sys.audio.mute', 0, 'u8', 5);
   }
 
   sleep($streamWait2) if ($streamWait2 > 0);
@@ -1121,14 +1121,14 @@ sub SIRD_DoStream(@)
 
   if ('' ne $streamInput)
   {
-    GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.mode?pin='.$pin.'&value='.$input, 5, '', 1, 5);
+    SIRD_SendRequestBlocking($name, $ip, $pin, 'netRemote.sys.mode', $input, 'u32', 5);
 
     sleep($streamWait3) if ($streamWait3 > 0);
   }
 
   if ('off' eq $power)
   {
-    GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.power?pin='.$pin.'&value=0', 5, '', 1, 5);
+    SIRD_SendRequestBlocking($name, $ip, $pin, 'netRemote.sys.power', 0, 'u8', 5);
 
     sleep($streamWait4) if ($streamWait4 > 0);
   }
@@ -1165,7 +1165,7 @@ sub SIRD_AbortStream($)
 
 sub SIRD_StartWebserver($$$$)
 {
-  my ($hash, $port, $path, $file) = @_;
+  my ($hash, $port, $path) = @_;
   my $name = $hash->{NAME};
 
   if (exists($hash->{helper}{PID_WEBSERVER}))
@@ -1175,16 +1175,26 @@ sub SIRD_StartWebserver($$$$)
     BlockingKill($hash->{helper}{PID_WEBSERVER}) if (defined($hash->{helper}{PID_WEBSERVER}));
   }
 
-  $hash->{helper}{PID_WEBSERVER} = BlockingCall('SIRD_DoWebserver', $name.'|'.$port.'|'.$path.'|'.$file);
+  $hash->{helper}{PID_WEBSERVER} = BlockingCall('SIRD_DoWebserver', $name.'|'.$port.'|'.$path);
 }
 
 
 sub SIRD_DoWebserver(@)
 {
   my ($string) = @_;
-  my ($name, $port, $path, $file) = split("\\|", $string);
+  my ($name, $port, $path) = split("\\|", $string);
 
   Log3 $name, 5, $name.': Blocking call running: webserver.';
+
+  #if (-e $attr{global}{modpath}.'/FHEM/lib/SIRD_Webserver.pl')
+  #{
+  #  Log3 $name, 3, $name.': External webserver started ('.$attr{global}{modpath}.'/FHEM/lib/SIRD_Webserver.pl).';
+  #
+    # replace process to save memory
+  #  exec('perl /opt/fhem/FHEM/lib/SIRD_Webserver.pl', qw($port, $path)) or die(1);
+  #}
+
+  #Log3 $name, 3, $name.': Internal webserver started.';
 
   my $daemon = HTTP::Daemon->new(LocalPort => $port, ReuseAddr => 1, Timeout => 300) or return $name;
 
@@ -1192,11 +1202,36 @@ sub SIRD_DoWebserver(@)
   {
     while (my $request = $client->get_request)
     {
+      my $file = substr($request->url->path(), 1);
+
       Log3 $name, 5, $name.': Webserver request: '.Dumper($request);
 
       if ('HEAD' eq $request->method)
       {
-        $client->send_header('Content-Type', 'audio/mpeg');
+        my $extension = 'mp3';
+
+        if ($file =~ /\.(.+)$/)
+        {
+          $extension = lc($1);
+        }
+
+        if ('wma' eq $extension)
+        {
+          $client->send_header('Content-Type', 'audio/x-ms-wma');
+        }
+        elsif ('flac' eq $extension)
+        {
+          $client->send_header('Content-Type', 'audio/flac');
+        }
+        elsif ('wav' eq $extension)
+        {
+          $client->send_header('Content-Type', 'audio/wav');
+        }
+        else
+        {
+          $client->send_header('Content-Type', 'audio/mpeg');
+        }
+
         $client->send_response(200, 'OK');
       }
 
@@ -1210,8 +1245,10 @@ sub SIRD_DoWebserver(@)
 
     $client->close;
 
-    Log3 $name, 5, $name.': Webserver closed';
+    Log3 $name, 5, $name.': Connection closed';
   }
+  
+  Log3 $name, 5, $name.': Webserver closed';
 
   return $name;
 }
@@ -1384,160 +1421,160 @@ sub SIRD_ClearReadings($)
 }
 
 
-sub SIRD_SetReadings($)
+sub SIRD_SetReadings($$$)
 {
-  my ($hash) = @_;
+  my ($hash, $nodeName, $node) = @_;
   my $name = $hash->{NAME};
-  my $reading;
+  my $reading = '';
 
-  if (('nav.state' eq $_->{node}) && (0 == $_->{value}->{u8}))
+  if (('nav.state' eq $nodeName) && (0 == $node->{value}->{u8}{value}))
   {
     # enable navigation if needed!!!
     SIRD_SendRequest($hash, 'SET', 'netRemote.nav.state', 1, 0, \&SIRD_ParseNavState);
   }
-  elsif ('sys.caps.volumeSteps' eq $_->{node})
+  elsif ('sys.caps.volumeSteps' eq $nodeName)
   {
-    readingsBulkUpdateIfChanged($hash, '.volumeSteps', ($_->{value}->{u8} > 20 && $_->{value}->{u8} < 99 ? $_->{value}->{u8} - 1 : 20));
+    readingsBulkUpdateIfChanged($hash, '.volumeSteps', ($node->{value}->{u8}{value} > 20 && $node->{value}->{u8}{value} < 99 ? $node->{value}->{u8}{value} - 1 : 20));
   }
-  elsif ('nav.numItems' eq $_->{node})
+  elsif ('nav.numItems' eq $nodeName)
   {
-    readingsBulkUpdateIfChanged($hash, '.numNav', $_->{value}->{s32} - 1);
+    readingsBulkUpdateIfChanged($hash, '.numNav', $node->{value}->{s32}{value} - 1);
   }
-  elsif ('sys.mode' eq $_->{node})
+  elsif ('sys.mode' eq $nodeName)
   {
     my $inputReading = ReadingsVal($name, '.inputs', '');
 
-    if ($inputReading =~ /$_->{value}->{u32}:(.*?)(?:,|$)/)
+    if ($inputReading =~ /$node->{value}->{u32}{value}:(.*?)(?:,|$)/)
     {
       readingsBulkUpdateIfChanged($hash, 'input', $1);
     }
   }
-  elsif ('sys.info.version' eq $_->{node})
+  elsif ('sys.info.version' eq $nodeName)
   {
-    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
+    $reading = encode_utf8(exists($node->{value}->{c8_array}{value}) ? $node->{value}->{c8_array}{value} : '');
 
     readingsBulkUpdateIfChanged($hash, 'version', $reading);
   }
-  elsif ('sys.info.friendlyName' eq $_->{node})
+  elsif ('sys.info.friendlyName' eq $nodeName)
   {
-    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
+    $reading = encode_utf8(exists($node->{value}->{c8_array}{value}) ? $node->{value}->{c8_array}{value} : '');
 
     readingsBulkUpdateIfChanged($hash, 'friendlyName', $reading);
   }
-  elsif ('sys.audio.volume' eq $_->{node})
+  elsif ('sys.audio.volume' eq $nodeName)
   {
     my $volumeSteps = ReadingsVal($name, '.volumeSteps', 20);
 
-    readingsBulkUpdateIfChanged($hash, 'volume', int($_->{value}->{u8} * (100 / $volumeSteps)));
-    readingsBulkUpdateIfChanged($hash, 'volumeStraight', int($_->{value}->{u8}));
+    readingsBulkUpdateIfChanged($hash, 'volume', int($node->{value}->{u8}{value} * (100 / $volumeSteps)));
+    readingsBulkUpdateIfChanged($hash, 'volumeStraight', int($node->{value}->{u8}{value}));
   }
-  elsif ('sys.net.wlan.rssi' eq $_->{node})
+  elsif ('sys.net.wlan.rssi' eq $nodeName)
   {
-    readingsBulkUpdateIfChanged($hash, 'rssi', $_->{value}->{u8});
+    readingsBulkUpdateIfChanged($hash, 'rssi', $node->{value}->{u8}{value});
   }
-  elsif ('play.info.name' eq $_->{node})
+  elsif ('play.info.name' eq $nodeName)
   {
-    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
+    $reading = encode_utf8(exists($node->{value}->{c8_array}{value}) ? $node->{value}->{c8_array}{value} : '');
 
     readingsBulkUpdateIfChanged($hash, 'currentTitle', $reading);
   }
-  elsif ('play.info.duration' eq $_->{node})
+  elsif ('play.info.duration' eq $nodeName)
   {
-    readingsBulkUpdateIfChanged($hash, 'duration', $_->{value}->{u32});
+    readingsBulkUpdateIfChanged($hash, 'duration', $node->{value}->{u32}{value});
   }
-  elsif ('play.signalStrength' eq $_->{node})
+  elsif ('play.signalStrength' eq $nodeName)
   {
-    readingsBulkUpdateIfChanged($hash, 'signalStrength', $_->{value}->{u8});
+    readingsBulkUpdateIfChanged($hash, 'signalStrength', $node->{value}->{u8}{value});
   }
-  elsif ('play.info.graphicUri' eq $_->{node})
+  elsif ('play.info.graphicUri' eq $nodeName)
   {
-    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
+    $reading = encode_utf8(exists($node->{value}->{c8_array}{value}) ? $node->{value}->{c8_array}{value} : '');
 
     readingsBulkUpdateIfChanged($hash, 'graphicUri', $reading);
   }
-  elsif ('play.info.text' eq $_->{node})
+  elsif ('play.info.text' eq $nodeName)
   {
-    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
+    $reading = encode_utf8(exists($node->{value}->{c8_array}{value}) ? $node->{value}->{c8_array}{value} : '');
 
     readingsBulkUpdateIfChanged($hash, 'infoText', $reading);
   }
-  elsif ('play.status' eq $_->{node})
+  elsif ('play.status' eq $nodeName)
   {
     my @result = ('idle', 'buffering', 'playing', 'paused', 'rebuffering', 'error', 'stopped');
-    $reading = ($_->{value}->{u8} < 7 ? $result[$_->{value}->{u8}] : 'unknown');
+    $reading = ($node->{value}->{u8}{value} < 7 ? $result[$node->{value}->{u8}{value}] : 'unknown');
 
     readingsBulkUpdateIfChanged($hash, 'playStatus', $reading);
   }
-  elsif ('play.position' eq $_->{node})
+  elsif ('play.position' eq $nodeName)
   {
-    my $minutes = $_->{value}->{u32} / 60000;
-    my $seconds = ($_->{value}->{u32} / 1000) - (($_->{value}->{u32} / 60000) * 60);
+    my $minutes = $node->{value}->{u32}{value} / 60000;
+    my $seconds = ($node->{value}->{u32}{value} / 1000) - (($node->{value}->{u32}{value} / 60000) * 60);
     $reading = sprintf("%d:%02d", $minutes, $seconds);
 
     readingsBulkUpdateIfChanged($hash, 'position', $reading);
   }
-  elsif ('play.repeat' eq $_->{node})
+  elsif ('play.repeat' eq $nodeName)
   {
-    $reading = (1 == $_->{value}->{u8} ? 'on' : 'off');
+    $reading = (1 == $node->{value}->{u8}{value} ? 'on' : 'off');
 
     readingsBulkUpdateIfChanged($hash, 'repeat', $reading);
   }
-  elsif ('play.shuffle' eq $_->{node})
+  elsif ('play.shuffle' eq $nodeName)
   {
-    $reading = (1 == $_->{value}->{u8} ? 'on' : 'off');
+    $reading = (1 == $node->{value}->{u8}{value} ? 'on' : 'off');
 
     readingsBulkUpdateIfChanged($hash, 'shuffle', $reading);
   }
-  elsif ('play.frequency' eq $_->{node})
+  elsif ('play.frequency' eq $nodeName)
   {
-    if ($_->{value}->{u32} < 200000)
+    if ($node->{value}->{u32}{value} < 200000)
     {
-      readingsBulkUpdateIfChanged($hash, 'frequency', sprintf("%.2f", $_->{value}->{u32} / 1000));
+      readingsBulkUpdateIfChanged($hash, 'frequency', sprintf("%.2f", $node->{value}->{u32}{value} / 1000));
     }
     else
     {
       readingsBulkUpdateIfChanged($hash, 'frequency', '');
     }
   }
-  elsif ('sys.audio.mute' eq $_->{node})
+  elsif ('sys.audio.mute' eq $nodeName)
   {
-    $reading = (1 == $_->{value}->{u8} ? 'on' : 'off');
+    $reading = (1 == $node->{value}->{u8}{value} ? 'on' : 'off');
 
     readingsBulkUpdateIfChanged($hash, 'mute', $reading);
   }
-  elsif ('play.info.artist' eq $_->{node})
+  elsif ('play.info.artist' eq $nodeName)
   {
-    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
+    $reading = encode_utf8(exists($node->{value}->{c8_array}{value}) ? $node->{value}->{c8_array}{value} : '');
 
     readingsBulkUpdateIfChanged($hash, 'currentArtist', $reading);
   }
-  elsif ('play.info.album' eq $_->{node})
+  elsif ('play.info.album' eq $nodeName)
   {
-    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
+    $reading = encode_utf8(exists($node->{value}->{c8_array}{value}) ? $node->{value}->{c8_array}{value} : '');
 
     readingsBulkUpdateIfChanged($hash, 'currentAlbum', $reading);
   }
-  elsif ('play.info.albumDescription' eq $_->{node})
+  elsif ('play.info.albumDescription' eq $nodeName)
   {
-    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
+    $reading = encode_utf8(exists($node->{value}->{c8_array}{value}) ? $node->{value}->{c8_array}{value} : '');
 
     readingsBulkUpdateIfChanged($hash, 'currentAlbumDescription', $reading);
   }
-  elsif ('play.info.artistDescription' eq $_->{node})
+  elsif ('play.info.artistDescription' eq $nodeName)
   {
-    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
+    $reading = encode_utf8(exists($node->{value}->{c8_array}{value}) ? $node->{value}->{c8_array}{value} : '');
 
     readingsBulkUpdateIfChanged($hash, 'currentArtistDescription', $reading);
   }
-  elsif ('play.info.description' eq $_->{node})
+  elsif ('play.info.description' eq $nodeName)
   {
-    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
+    $reading = encode_utf8(exists($node->{value}->{c8_array}{value}) ? $node->{value}->{c8_array}{value} : '');
 
     readingsBulkUpdateIfChanged($hash, 'description', $reading);
   }
-  elsif ('play.errorStr' eq $_->{node})
+  elsif ('play.errorStr' eq $nodeName)
   {
-    $reading = encode_utf8(!ref($_->{value}->{c8_array}) ? $_->{value}->{c8_array} : '');
+    $reading = encode_utf8(exists($node->{value}->{c8_array}{value}) ? $node->{value}->{c8_array}{value} : '');
 
     readingsBulkUpdateIfChanged($hash, 'errorStr', $reading);
   }
@@ -1609,6 +1646,54 @@ sub SIRD_SendRequest($$$$$$;$)
 }
 
 
+sub SIRD_SendRequestBlocking($$$$$$$)
+{
+  my ($name, $ip, $pin, $request, $value, $type, $timeout) = @_;
+  my $retry = 0;
+  my $data;
+  my $xml;
+  my $startTime;
+  my $isDone = 0;
+
+  return undef if (IsDisabled($name));
+
+  do
+  {
+    $data = GetFileFromURL('http://'.$ip.':80/fsapi/SET/'.$request.'?pin='.$pin.'&value='.$value, 5, '', 1, 5);
+    if ($data && ($data =~ /fsapiResponse/))
+    {
+      eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
+
+      if (!$@ && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
+      {
+        $startTime = time();
+
+        do
+        {
+          $data = GetFileFromURL('http://'.$ip.':80/fsapi/GET/'.$request.'?pin='.$pin, 5, '', 1, 5);
+          if ($data && ($data =~ /fsapiResponse/))
+          {
+            eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
+
+            if (!$@ && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
+            {
+              if ($value == $xml->{fsapiResponse}{value}->{$type}{value})
+              {
+                Log3 $name, 5, $name.': successfully completed ('.$request.' value='.$value.').';
+                
+                $isDone = 1;
+              }
+            }
+          }
+        } while (((time() - $startTime) < $timeout) && (0 == $isDone));
+      }
+    }
+    
+    $retry++;
+  } while (($retry < 3) && (0 == $isDone));
+}
+
+
 sub SIRD_ParseNotifies($$$)
 {
   my ($param, $err, $data) = @_;
@@ -1625,27 +1710,25 @@ sub SIRD_ParseNotifies($$$)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
-    eval {$xml = xmlin($data, keeproot => 0);};
+    eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
-    if (!$@ && ('FS_OK' eq $xml->{status}) && exists($xml->{notify}))
+    if (!$@ && exists($xml->{fsapiResponse}{status}) && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}) && exists($xml->{fsapiResponse}{notify}))
     {
       Log3 $name, 5, $name.': Notifications '.$param->{cmd}.' successful.';
 
       readingsBeginUpdate($hash);
 
-      foreach (@{forcearray($xml->{notify})})
+      foreach (@{forcearray($xml->{fsapiResponse}{notify})})
       {
         if (exists($_->{node}))
         {
-          $_->{node} = substr($_->{node}, 10);
-
-          SIRD_SetReadings($hash);
+          SIRD_SetReadings($hash, substr($_->{node}{value}, 10), $_);
         }
       }
 
       readingsEndUpdate($hash, 1);
     }
-    elsif (!$@ && ('FS_TIMEOUT' eq $xml->{status}))
+    elsif (!$@ && exists($xml->{fsapiResponse}{status}) && ('FS_TIMEOUT' eq $xml->{fsapiResponse}{status}{value}))
     {
       # do nothing here
     }
@@ -1690,21 +1773,19 @@ sub SIRD_ParseMultiple($$$)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
-    eval {$xml = xmlin($data, keeproot => 0);};
+    eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
     readingsBeginUpdate($hash);
 
-    if (!$@ && exists($xml->{fsapiResponse}))
+    if (!$@ && exists($xml->{fsapiGetMultipleResponse}{fsapiResponse}))
     {
       Log3 $name, 5, $name.': Multiple '.$param->{cmd}.' successful.';
 
-      foreach (@{forcearray($xml->{fsapiResponse})})
+      foreach (@{forcearray($xml->{fsapiGetMultipleResponse}{fsapiResponse})})
       {
-        if (exists($_->{node}) && exists($_->{status}) && exists($_->{value}) && ('FS_OK' eq $_->{status}))
+        if (exists($_->{node}) && exists($_->{status}) && exists($_->{value}) && ('FS_OK' eq $_->{status}{value}))
         {
-          $_->{node} = substr($_->{node}, 10);
-
-          SIRD_SetReadings($hash);
+          SIRD_SetReadings($hash, substr($_->{node}{value}, 10), $_);
         }
       }
     }
@@ -1733,23 +1814,20 @@ sub SIRD_ParseGeneral($$$)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
-    eval {$xml = xmlin($data, keeproot => 0);};
+    eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
-    if (!$@ && ('FS_OK' eq $xml->{status}))
+    if (!$@ && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
     {
       Log3 $name, 5, $name.': General '.$param->{cmd}.' successful.';
 
       if ('GET' eq $param->{cmd})
       {
-        $xml->{node} = substr($param->{request}, 10);
-        $_ = $xml;
-
         readingsBeginUpdate($hash);
-        SIRD_SetReadings($hash);
+        SIRD_SetReadings($hash, substr($param->{request}, 10), $xml->{fsapiResponse});
         readingsEndUpdate($hash, 1);
       }
     }
-    elsif ($xml->{status} !~ /FS_NODE/)
+    elsif ($xml->{fsapiResponse}{status}{value} !~ /FS_NODE/)
     {
       Log3 $name, 5, $name.': General '.$param->{request}.' failed.';
     }
@@ -1772,13 +1850,13 @@ sub SIRD_ParseLogin($$$)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
-    eval {$xml = xmlin($data, keeproot => 0);};
+    eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
-    if (!$@ && ('FS_OK' eq $xml->{status}))
+    if (!$@ && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
     {
       Log3 $name, 5, $name.': Login successful.';
 
-      $hash->{helper}{sid} = $xml->{sessionId};
+      $hash->{helper}{sid} = $xml->{fsapiResponse}{sessionId}{value};
     }
     else
     {
@@ -1803,15 +1881,15 @@ sub SIRD_ParsePower($$$)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
-    eval {$xml = xmlin($data, keeproot => 0);};
+    eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
-    if (!$@ && ('FS_OK' eq $xml->{status}))
+    if (!$@ && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
     {
       Log3 $name, 5, $name.': Power '.$param->{cmd}.' successful.';
 
       if ('GET' eq $param->{cmd})
       {
-        readingsSingleUpdate($hash, 'power', (1 == $xml->{value}->{u8} ? 'on' : 'off'), 1);
+        readingsSingleUpdate($hash, 'power', (1 == $xml->{fsapiResponse}{value}->{u8}{value} ? 'on' : 'off'), 1);
         readingsSingleUpdate($hash, 'presence', 'present', 1);
       }
       elsif ('SET' eq $param->{cmd})
@@ -1850,9 +1928,9 @@ sub SIRD_ParsePlay($$$)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
-    eval {$xml = xmlin($data, keeproot => 0);};
+    eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
-    if (!$@ && ('FS_OK' eq $xml->{status}))
+    if (!$@ && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
     {
       Log3 $name, 5, $name.': Play '.$param->{cmd}.' successful.';
 
@@ -1860,7 +1938,7 @@ sub SIRD_ParsePlay($$$)
       {
         my @result = ('idle', 'buffering', 'playing', 'paused', 'rebuffering', 'error', 'stopped');
 
-        readingsSingleUpdate($hash, 'playStatus', ($xml->{value}->{u8} < 7 ? $result[$xml->{value}->{u8}] : 'unknown'), 1);
+        readingsSingleUpdate($hash, 'playStatus', ($xml->{fsapiResponse}{value}->{u8}{value} < 7 ? $result[$xml->{fsapiResponse}{value}->{u8}{value}] : 'unknown'), 1);
       }
       elsif ('SET' eq $param->{cmd})
       {
@@ -1899,9 +1977,9 @@ sub SIRD_ParseVolume($$$)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
-    eval {$xml = xmlin($data, keeproot => 0);};
+    eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
-    if (!$@ && ('FS_OK' eq $xml->{status}))
+    if (!$@ && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
     {
       my $volumeSteps = ReadingsVal($name, '.volumeSteps', 20);
 
@@ -1909,8 +1987,8 @@ sub SIRD_ParseVolume($$$)
 
       if ('GET' eq $param->{cmd})
       {
-        readingsSingleUpdate($hash, 'volume', int($xml->{value}->{u8} * (100 / $volumeSteps)), 1) if (ReadingsVal($name, 'volume', -1) ne int($xml->{value}->{u8} * (100 / $volumeSteps)));
-        readingsSingleUpdate($hash, 'volumeStraight', int($xml->{value}->{u8}), 1) if (ReadingsVal($name, 'volumeStraight', -1) ne int($xml->{value}->{u8}));
+        readingsSingleUpdate($hash, 'volume', int($xml->{fsapiResponse}{value}->{u8}{value} * (100 / $volumeSteps)), 1) if (ReadingsVal($name, 'volume', -1) ne int($xml->{fsapiResponse}{value}->{u8}{value} * (100 / $volumeSteps)));
+        readingsSingleUpdate($hash, 'volumeStraight', int($xml->{fsapiResponse}{value}->{u8}{value}), 1) if (ReadingsVal($name, 'volumeStraight', -1) ne int($xml->{fsapiResponse}{value}->{u8}{value}));
       }
       elsif ('SET' eq $param->{cmd})
       {
@@ -1941,15 +2019,15 @@ sub SIRD_ParseMute($$$)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
-    eval {$xml = xmlin($data, keeproot => 0);};
+    eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
-    if (!$@ && ('FS_OK' eq $xml->{status}))
+    if (!$@ && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
     {
       Log3 $name, 5, $name.': Mute '.$param->{cmd}.' successful.';
 
       if ('GET' eq $param->{cmd})
       {
-        readingsSingleUpdate($hash, 'mute', (1 == $xml->{value}->{u8} ? 'on' : 'off'), 1);
+        readingsSingleUpdate($hash, 'mute', (1 == $xml->{fsapiResponse}{value}->{u8}{value} ? 'on' : 'off'), 1);
       }
       elsif ('SET' eq $param->{cmd})
       {
@@ -1979,15 +2057,15 @@ sub SIRD_ParseShuffle($$$)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
-    eval {$xml = xmlin($data, keeproot => 0);};
+    eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
-    if (!$@ && ('FS_OK' eq $xml->{status}))
+    if (!$@ && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
     {
       Log3 $name, 5, $name.': Shuffle '.$param->{cmd}.' successful.';
 
       if ('GET' eq $param->{cmd})
       {
-        readingsSingleUpdate($hash, 'shuffle', (1 == $xml->{value}->{u8} ? 'on' : 'off'), 1);
+        readingsSingleUpdate($hash, 'shuffle', (1 == $xml->{fsapiResponse}{value}->{u8}{value} ? 'on' : 'off'), 1);
       }
       elsif ('SET' eq $param->{cmd})
       {
@@ -2017,15 +2095,15 @@ sub SIRD_ParseRepeat($$$)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
-    eval {$xml = xmlin($data, keeproot => 0);};
+    eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
-    if (!$@ && ('FS_OK' eq $xml->{status}))
+    if (!$@ && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
     {
       Log3 $name, 5, $name.': Repeat '.$param->{cmd}.' successful.';
 
       if ('GET' eq $param->{cmd})
       {
-        readingsSingleUpdate($hash, 'repeat', (1 == $xml->{value}->{u8} ? 'on' : 'off'), 1);
+        readingsSingleUpdate($hash, 'repeat', (1 == $xml->{fsapiResponse}{value}->{u8}{value} ? 'on' : 'off'), 1);
       }
       elsif ('SET' eq $param->{cmd})
       {
@@ -2055,9 +2133,9 @@ sub SIRD_ParseNavState($$$)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
-    eval {$xml = xmlin($data, keeproot => 0);};
+    eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
-    if (!$@ && ('FS_OK' eq $xml->{status}))
+    if (!$@ && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
     {
       Log3 $name, 5, $name.': NavState '.$param->{cmd}.' successful.';
     }
@@ -2084,9 +2162,9 @@ sub SIRD_ParseInputs($$$)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
-    eval {$xml = xmlin($data, keeproot => 0);};
+    eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
-    if (!$@ && ('FS_OK' eq $xml->{status}))
+    if (!$@ && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
     {
       if ('SET' eq $param->{cmd})
       {
@@ -2103,16 +2181,16 @@ sub SIRD_ParseInputs($$$)
 
         Log3 $name, 5, $name.': Inputs '.$param->{cmd}.' successful.';
 
-        foreach my $item (@{forcearray($xml->{item})})
+        foreach my $item (@{forcearray($xml->{fsapiResponse}{item})})
         {
-          if (exists($item->{key}) && exists($item->{field}) && (scalar(@{forcearray($item->{field})}) >= 1))
+          if (exists($item->{key}) && exists($item->{field}))
           {
             foreach my $field (@{forcearray($item->{field})})
             {
-              if (exists($field->{name}) && ('label' eq $field->{name}) && !ref($field->{c8_array}))
+              if (exists($field->{name}) && ('label' eq $field->{name}{value}) && exists($field->{c8_array}{value}))
               {
                 $inputs .= ',' if ('' ne $inputs);
-                $inputs .= $item->{key}.':'.lc($field->{c8_array});
+                $inputs .= $item->{key}{value}.':'.lc($field->{c8_array}{value});
               }
             }
           }
@@ -2153,9 +2231,9 @@ sub SIRD_ParsePresets($$$)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
-    eval {$xml = xmlin($data, keeproot => 0);};
+    eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
-    if (!$@ && ('FS_OK' eq $xml->{status}))
+    if (!$@ && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
     {
       if ('SET' eq $param->{cmd})
       {
@@ -2176,19 +2254,19 @@ sub SIRD_ParsePresets($$$)
 
         Log3 $name, 5, $name.': Presets '.$param->{cmd}.' successful.';
 
-        foreach my $item (@{forcearray($xml->{item})})
+        foreach my $item (@{forcearray($xml->{fsapiResponse}{item})})
         {
-          if (exists($item->{key}) && exists($item->{field}) && (scalar(@{forcearray($item->{field})}) >= 1))
+          if (exists($item->{key}) && exists($item->{field}))
           {
             foreach my $field (@{forcearray($item->{field})})
             {
-              if (exists($field->{name}) && ('name' eq $field->{name}) && !ref($field->{c8_array}))
+              if (exists($field->{name}) && ('name' eq $field->{name}{value}) && exists($field->{c8_array}{value}))
               {
-                $_ = $field->{c8_array};
+                $_ = $field->{c8_array}{value};
                 $_ =~ s/(?:\:|,)//g;
 
                 $presets .= ',' if ('' ne $presets);
-                $presets .= $item->{key}.':'.$_;
+                $presets .= $item->{key}{value}.':'.$_;
               }
             }
           }
@@ -2204,10 +2282,10 @@ sub SIRD_ParsePresets($$$)
     {
       if ('LIST_GET_NEXT' eq $param->{cmd})
       {
-        my $input = ReadingsVal($name, 'input', '');
+        #my $input = ReadingsVal($name, 'input', '');
 
-        readingsSingleUpdate($hash, 'preset', '', 1);
-        readingsSingleUpdate($hash, '.'.$input.'presets', '', 1);
+        #readingsSingleUpdate($hash, 'preset', '', 1);
+        #readingsSingleUpdate($hash, '.'.$input.'presets', '', 1);
       }
     }
   }
@@ -2229,9 +2307,9 @@ sub SIRD_ParseNavigation($$$)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
-    eval {$xml = xmlin($data, keeproot => 0);};
+    eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
-    if (!$@ && ('FS_OK' eq $xml->{status}))
+    if (!$@ && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
     {
       if ('SET' eq $param->{cmd})
       {
@@ -2246,26 +2324,26 @@ sub SIRD_ParseNavigation($$$)
 
         Log3 $name, 5, $name.': Navigation '.$param->{cmd}.' successful.';
 
-        foreach my $item (@{forcearray($xml->{item})})
+        foreach my $item (@{forcearray($xml->{fsapiResponse}{item})})
         {
-          if (exists($item->{key}) && exists($item->{field}) && (scalar(@{forcearray($item->{field})}) >= 1))
+          if (exists($item->{key}) && exists($item->{field}))
           {
             my $type = undef;
             my $name = undef;
 
             foreach my $field (@{forcearray($item->{field})})
             {
-              if (exists($field->{name}) && ('name' eq $field->{name}) && !ref($field->{c8_array}))
+              if (exists($field->{name}) && ('name' eq $field->{name}{value}) && exists($field->{c8_array}{value}))
               {
-                $_ = $field->{c8_array};
+                $_ = $field->{c8_array}{value};
                 $_ =~ s/[^0-9a-zA-Z\.\-\_]+//g;
 
-                $name = $item->{key}.':'.$_;
+                $name = $item->{key}{value}.':'.$_;
               }
 
-              if (exists($field->{name}) && ('type' eq $field->{name}))
+              if (exists($field->{name}) && ('type' eq $field->{name}{value}))
               {
-                $type = $field->{u8};
+                $type = $field->{u8}{value};
               }
             }
 
@@ -2312,23 +2390,23 @@ sub SIRD_ParseDeviceInfo($$$)
 
   if ('' ne $err)
   {
-    Log3 $name, 3, $name.': Error while requesting '.$param->{url}.' - '.$err;
+    Log3 $name, 5, $name.': Error while requesting '.$param->{url}.' - '.$err;
   }
   elsif ('' ne $data)
   {
     Log3 $name, 5, $name.': URL '.$param->{url}." returned:\n".$data;
 
-    eval {$xml = xmlin($data, keeproot => 0);};
+    eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
     if (!$@)
     {
-      $hash->{MODEL} = encode_utf8(!ref($xml->{device}->{manufacturer}) && ('' ne $xml->{device}->{manufacturer}) ? $xml->{device}->{manufacturer}.' ' : '').
-                       encode_utf8(!ref($xml->{device}->{modelName}) ? $xml->{device}->{modelName} : '');
-      $hash->{UDN} = encode_utf8(!ref($xml->{device}->{UDN}) ? $xml->{device}->{UDN} : '');
+      $hash->{MODEL} = encode_utf8(('' ne $xml->{root}{device}->{manufacturer}{value}) ? $xml->{root}{device}->{manufacturer}{value}.' ' : '').
+                       encode_utf8($xml->{root}{device}->{modelName}{value});
+      $hash->{UDN} = encode_utf8($xml->{root}{device}->{UDN}{value});
     }
     else
     {
-      Log3 $name, 3, $name.': DeviceInfo failed.';
+      Log3 $name, 5, $name.': DeviceInfo failed.';
     }
   }
 }
@@ -2348,136 +2426,6 @@ sub SIRD_ParseDlna($$$)
   elsif ('' ne $data)
   {
     Log3 $name, 5, $name.': Dlna command '.$param->{cmd}." returned:\n".$data;
-
-    #eval {$xml = xmlin($data, keeproot => 0);};
-
-    #if (!$@)
-    #{
-
-    #}
-  }
-}
-
-
-sub SIRD_SwitchInput($$$$)
-{
-  my ($name, $ip, $pin, $streamInput) = @_;
-  my $data;
-  my $xml;
-  my $startTime;
-
-  Log3 $name, 5, $name.': start switch to input.';
-
-  $data = GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.mode?pin='.$pin.'&value='.$streamInput, 5, '', 1, 5);
-  if ($data && ($data =~ /fsapiResponse/))
-  {
-    eval {$xml = xmlin($data, keeproot => 0);};
-
-    if (!$@ && ('FS_OK' eq $xml->{status}))
-    {
-      $startTime = time();
-
-      do
-      {
-        $data = GetFileFromURL('http://'.$ip.':80/fsapi/GET/netRemote.sys.mode?pin='.$pin, 5, '', 1, 5);
-        if ($data && ($data =~ /fsapiResponse/))
-        {
-          eval {$xml = xmlin($data, keeproot => 0);};
-
-          if (!$@ && ('FS_OK' eq $xml->{status}))
-          {
-            if ($streamInput == $xml->{value}->{u32})
-            {
-              Log3 $name, 5, $name.': switch to input successfully completed.';
-
-              $startTime -= 100;
-            }
-          }
-        }
-      } while (((time() - $startTime) < 5));
-    }
-  }
-}
-
-
-sub SIRD_PowerOn($$$)
-{
-  my ($name, $ip, $pin) = @_;
-  my $data;
-  my $xml;
-  my $startTime;
-
-  Log3 $name, 5, $name.': start power on.';
-
-  $data = GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.power?pin='.$pin.'&value=1', 5, '', 1, 5);
-  if ($data && ($data =~ /fsapiResponse/))
-  {
-    eval {$xml = xmlin($data, keeproot => 0);};
-
-    if (!$@ && ('FS_OK' eq $xml->{status}))
-    {
-      $startTime = time();
-
-      do
-      {
-        $data = GetFileFromURL('http://'.$ip.':80/fsapi/GET/netRemote.sys.power?pin='.$pin, 5, '', 1, 5);
-        if ($data && ($data =~ /fsapiResponse/))
-        {
-          eval {$xml = xmlin($data, keeproot => 0);};
-
-          if (!$@ && ('FS_OK' eq $xml->{status}))
-          {
-            if (1 == $xml->{value}->{u8})
-            {
-              Log3 $name, 5, $name.': power on successfully completed.';
-
-              $startTime -= 100;
-            }
-          }
-        }
-      } while (((time() - $startTime) < 15));
-    }
-  }
-}
-
-
-sub SIRD_UnMute($$$)
-{
-  my ($name, $ip, $pin) = @_;
-  my $data;
-  my $xml;
-  my $startTime;
-
-  Log3 $name, 5, $name.': start unmute.';
-
-  $data = GetFileFromURL('http://'.$ip.':80/fsapi/SET/netRemote.sys.audio.mute?pin='.$pin.'&value=0', 5, '', 1, 5);
-  if ($data && ($data =~ /fsapiResponse/))
-  {
-    eval {$xml = xmlin($data, keeproot => 0);};
-
-    if (!$@ && ('FS_OK' eq $xml->{status}))
-    {
-      $startTime = time();
-
-      do
-      {
-        $data = GetFileFromURL('http://'.$ip.':80/fsapi/GET/netRemote.sys.audio.mute?pin='.$pin, 5, '', 1, 5);
-        if ($data && ($data =~ /fsapiResponse/))
-        {
-          eval {$xml = xmlin($data, keeproot => 0);};
-
-          if (!$@ && ('FS_OK' eq $xml->{status}))
-          {
-            if (0 == $xml->{value}->{u8})
-            {
-              Log3 $name, 5, $name.': unmute successfully completed.';
-
-              $startTime -= 100;
-            }
-          }
-        }
-      } while (((time() - $startTime) < 5));
-    }
   }
 }
 
@@ -2719,9 +2667,7 @@ sub SIRD_DlnaSetAVTransportURI($$$;$)
 
     if ('' ne $err)
     {
-      Log3 $name, 3, $name.': Something went wrong by setting AVTransportURI. ('.$err.')';
-
-      return $name;
+      Log3 $name, 3, $name.': Something went wrong by setting AVTransportURI for stream: '.$stream.'. ('.$err.')';
     }
     else
     {
@@ -2764,9 +2710,7 @@ sub SIRD_DlnaSetNextAVTransportURI($$$;$)
 
     if ('' ne $err)
     {
-      Log3 $name, 3, $name.': Something went wrong by setting NextAVTransportURI. ('.$err.')';
-
-      return $name;
+      Log3 $name, 3, $name.': Something went wrong by setting NextAVTransportURI for stream: '.$stream.'. ('.$err.')';
     }
     else
     {

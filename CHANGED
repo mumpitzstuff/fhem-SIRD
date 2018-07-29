@@ -1,13 +1,4 @@
-- command stream added to stream any http url or local files
-- attribute streamInput added (default: dmr)
-- attribute streamWaitTimes added (default: 0:1:0:0)
-- attribute streamPath added (default: /opt/fhem/www/)
-- attribute streamPort added (default: 5000)
-- attribute ttsJinglePath added to configure a url to jingle files located on a webserver or Dlna server.
-- speak command can work with up to 200 chars now if no jingle is used (100 if a jingle is used)
-- speak command can contain a jingle file name (surrounded by |) like e.g. |jingle.mp3|This is a test. The attribute ttsJinglePath and a possibly existing jingle file within the speak text always build a unit and must form the URL to the jingle together.
-- attribute ttsWaitTimes can now be 0:0:1:2:0:0 (default value changed)
-- some internal changes to increase stability of speak
-- radio is muted before it is switched on to execute the speak command
-- if ttsVolume is unset the normal volume setting is used instead of using 25
-- version increased from 1.1.6 to 1.1.7
+- memory leak fixed (leak was produced inside XML::Bare)
+- robustness of speak and stream commands enhanced (multiple tries to set a command)
+- some minor internal changes
+- version increased from 1.1.7 to 1.1.8
