@@ -1,4 +1,2 @@
-- memory leak fixed (leak was produced inside XML::Bare)
-- robustness of speak and stream commands enhanced (multiple tries to set a command)
-- some minor internal changes
-- version increased from 1.1.7 to 1.1.8
+- more checks for faulty xml added
+- v0.53 of XML::Bare or higher is required

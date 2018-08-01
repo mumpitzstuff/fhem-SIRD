@@ -12,11 +12,12 @@ use strict;
 use warnings;
 use utf8;
 use Encode qw(encode_utf8 decode_utf8);
-use XML::Bare qw(forcearray);
+# do not use xmlin and simple (memory leak!)
+use XML::Bare 0.53 qw(forcearray);
 use URI::Escape;
 use HTTP::Daemon;
 use IO::Socket::INET;
-use Data::Dumper;
+#use Data::Dumper;
 
 use HttpUtils;
 use Blocking;
@@ -77,7 +78,7 @@ sub SIRD_Define($$)
   $hash->{IP} = $ip;
   $hash->{PIN} = $pin;
   $hash->{INTERVAL} = $interval;
-  $hash->{VERSION} = '1.1.8';
+  $hash->{VERSION} = '1.1.9';
 
   delete($hash->{helper}{suspendUpdate});
   delete($hash->{helper}{notifications});
@@ -718,7 +719,8 @@ sub SIRD_DoNavigation(@)
     {
       eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
-      if (!$@ && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
+      if (!$@ && exists($xml->{fsapiResponse}{status}{value}) && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}) &&
+          exists($xml->{fsapiResponse}{value}->{s32}{value}))
       {
         $numNav = ($xml->{fsapiResponse}{value}->{s32}{value} >= 1 ? $xml->{fsapiResponse}{value}->{s32}{value} - 1 : 1);
       }
@@ -743,20 +745,20 @@ sub SIRD_DoNavigation(@)
 
           eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
-          if (!$@ && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
+          if (!$@ && exists($xml->{fsapiResponse}{status}{value}) && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
           {
             my $result = '';
 
             foreach my $item (@{forcearray($xml->{fsapiResponse}{item})})
             {
-              if (exists($item->{key}) && exists($item->{field}))
+              if (exists($item->{key}{value}) && exists($item->{field}))
               {
                 my $type = undef;
                 my $name = undef;
 
                 foreach my $field (@{forcearray($item->{field})})
                 {
-                  if (exists($field->{name}) && ('name' eq $field->{name}{value}) && exists($field->{c8_array}{value}))
+                  if (exists($field->{name}{value}) && ('name' eq $field->{name}{value}) && exists($field->{c8_array}{value}))
                   {
                     $_ = $field->{c8_array}{value};
                     $_ =~ s/[^0-9a-zA-Z\.\-\_]+//g;
@@ -766,7 +768,7 @@ sub SIRD_DoNavigation(@)
                     $lastNumNav = $item->{key}{value};
                   }
 
-                  if (exists($field->{name}) && ('type' eq $field->{name}{value}))
+                  if (exists($field->{name}{value}) && ('type' eq $field->{name}{value}) && exists($field->{u8}{value}))
                   {
                     $type = $field->{u8}{value};
                   }
@@ -1163,7 +1165,7 @@ sub SIRD_AbortStream($)
 }
 
 
-sub SIRD_StartWebserver($$$$)
+sub SIRD_StartWebserver($$$)
 {
   my ($hash, $port, $path) = @_;
   my $name = $hash->{NAME};
@@ -1204,7 +1206,7 @@ sub SIRD_DoWebserver(@)
     {
       my $file = substr($request->url->path(), 1);
 
-      Log3 $name, 5, $name.': Webserver request: '.Dumper($request);
+      Log3 $name, 5, $name.': Webserver request: '.$request;
 
       if ('HEAD' eq $request->method)
       {
@@ -1427,20 +1429,20 @@ sub SIRD_SetReadings($$$)
   my $name = $hash->{NAME};
   my $reading = '';
 
-  if (('nav.state' eq $nodeName) && (0 == $node->{value}->{u8}{value}))
+  if (('nav.state' eq $nodeName) && exists($node->{value}->{u8}{value}) && (0 == $node->{value}->{u8}{value}))
   {
     # enable navigation if needed!!!
     SIRD_SendRequest($hash, 'SET', 'netRemote.nav.state', 1, 0, \&SIRD_ParseNavState);
   }
-  elsif ('sys.caps.volumeSteps' eq $nodeName)
+  elsif (('sys.caps.volumeSteps' eq $nodeName) && exists($node->{value}->{u8}{value}))
   {
     readingsBulkUpdateIfChanged($hash, '.volumeSteps', ($node->{value}->{u8}{value} > 20 && $node->{value}->{u8}{value} < 99 ? $node->{value}->{u8}{value} - 1 : 20));
   }
-  elsif ('nav.numItems' eq $nodeName)
+  elsif (('nav.numItems' eq $nodeName) && exists($node->{value}->{s32}{value}))
   {
     readingsBulkUpdateIfChanged($hash, '.numNav', $node->{value}->{s32}{value} - 1);
   }
-  elsif ('sys.mode' eq $nodeName)
+  elsif (('sys.mode' eq $nodeName) && exists($node->{value}->{u32}{value}))
   {
     my $inputReading = ReadingsVal($name, '.inputs', '');
 
@@ -1461,14 +1463,14 @@ sub SIRD_SetReadings($$$)
 
     readingsBulkUpdateIfChanged($hash, 'friendlyName', $reading);
   }
-  elsif ('sys.audio.volume' eq $nodeName)
+  elsif (('sys.audio.volume' eq $nodeName) && exists($node->{value}->{u8}{value}))
   {
     my $volumeSteps = ReadingsVal($name, '.volumeSteps', 20);
 
     readingsBulkUpdateIfChanged($hash, 'volume', int($node->{value}->{u8}{value} * (100 / $volumeSteps)));
     readingsBulkUpdateIfChanged($hash, 'volumeStraight', int($node->{value}->{u8}{value}));
   }
-  elsif ('sys.net.wlan.rssi' eq $nodeName)
+  elsif (('sys.net.wlan.rssi' eq $nodeName) && exists($node->{value}->{u8}{value}))
   {
     readingsBulkUpdateIfChanged($hash, 'rssi', $node->{value}->{u8}{value});
   }
@@ -1478,11 +1480,11 @@ sub SIRD_SetReadings($$$)
 
     readingsBulkUpdateIfChanged($hash, 'currentTitle', $reading);
   }
-  elsif ('play.info.duration' eq $nodeName)
+  elsif (('play.info.duration' eq $nodeName) && exists($node->{value}->{u32}{value}))
   {
     readingsBulkUpdateIfChanged($hash, 'duration', $node->{value}->{u32}{value});
   }
-  elsif ('play.signalStrength' eq $nodeName)
+  elsif (('play.signalStrength' eq $nodeName) && exists($node->{value}->{u8}{value}))
   {
     readingsBulkUpdateIfChanged($hash, 'signalStrength', $node->{value}->{u8}{value});
   }
@@ -1498,14 +1500,14 @@ sub SIRD_SetReadings($$$)
 
     readingsBulkUpdateIfChanged($hash, 'infoText', $reading);
   }
-  elsif ('play.status' eq $nodeName)
+  elsif (('play.status' eq $nodeName) && exists($node->{value}->{u8}{value}))
   {
     my @result = ('idle', 'buffering', 'playing', 'paused', 'rebuffering', 'error', 'stopped');
     $reading = ($node->{value}->{u8}{value} < 7 ? $result[$node->{value}->{u8}{value}] : 'unknown');
 
     readingsBulkUpdateIfChanged($hash, 'playStatus', $reading);
   }
-  elsif ('play.position' eq $nodeName)
+  elsif (('play.position' eq $nodeName) && exists($node->{value}->{u32}{value}))
   {
     my $minutes = $node->{value}->{u32}{value} / 60000;
     my $seconds = ($node->{value}->{u32}{value} / 1000) - (($node->{value}->{u32}{value} / 60000) * 60);
@@ -1513,19 +1515,19 @@ sub SIRD_SetReadings($$$)
 
     readingsBulkUpdateIfChanged($hash, 'position', $reading);
   }
-  elsif ('play.repeat' eq $nodeName)
+  elsif (('play.repeat' eq $nodeName) && exists($node->{value}->{u8}{value}))
   {
     $reading = (1 == $node->{value}->{u8}{value} ? 'on' : 'off');
 
     readingsBulkUpdateIfChanged($hash, 'repeat', $reading);
   }
-  elsif ('play.shuffle' eq $nodeName)
+  elsif (('play.shuffle' eq $nodeName) && exists($node->{value}->{u8}{value}))
   {
     $reading = (1 == $node->{value}->{u8}{value} ? 'on' : 'off');
 
     readingsBulkUpdateIfChanged($hash, 'shuffle', $reading);
   }
-  elsif ('play.frequency' eq $nodeName)
+  elsif (('play.frequency' eq $nodeName) && exists($node->{value}->{u32}{value}))
   {
     if ($node->{value}->{u32}{value} < 200000)
     {
@@ -1536,7 +1538,7 @@ sub SIRD_SetReadings($$$)
       readingsBulkUpdateIfChanged($hash, 'frequency', '');
     }
   }
-  elsif ('sys.audio.mute' eq $nodeName)
+  elsif (('sys.audio.mute' eq $nodeName) && exists($node->{value}->{u8}{value}))
   {
     $reading = (1 == $node->{value}->{u8}{value} ? 'on' : 'off');
 
@@ -1664,7 +1666,7 @@ sub SIRD_SendRequestBlocking($$$$$$$)
     {
       eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
-      if (!$@ && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
+      if (!$@ && exists($xml->{fsapiResponse}{status}{value}) && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
       {
         $startTime = time();
 
@@ -1675,7 +1677,8 @@ sub SIRD_SendRequestBlocking($$$$$$$)
           {
             eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
-            if (!$@ && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
+            if (!$@ && exists($xml->{fsapiResponse}{status}{value}) && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}) &&
+                exists($xml->{fsapiResponse}{value}->{$type}{value}))
             {
               if ($value == $xml->{fsapiResponse}{value}->{$type}{value})
               {
@@ -1712,7 +1715,7 @@ sub SIRD_ParseNotifies($$$)
 
     eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
-    if (!$@ && exists($xml->{fsapiResponse}{status}) && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}) && exists($xml->{fsapiResponse}{notify}))
+    if (!$@ && exists($xml->{fsapiResponse}{status}{value}) && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}) && exists($xml->{fsapiResponse}{notify}))
     {
       Log3 $name, 5, $name.': Notifications '.$param->{cmd}.' successful.';
 
@@ -1720,7 +1723,7 @@ sub SIRD_ParseNotifies($$$)
 
       foreach (@{forcearray($xml->{fsapiResponse}{notify})})
       {
-        if (exists($_->{node}))
+        if (exists($_->{node}{value}))
         {
           SIRD_SetReadings($hash, substr($_->{node}{value}, 10), $_);
         }
@@ -1728,7 +1731,7 @@ sub SIRD_ParseNotifies($$$)
 
       readingsEndUpdate($hash, 1);
     }
-    elsif (!$@ && exists($xml->{fsapiResponse}{status}) && ('FS_TIMEOUT' eq $xml->{fsapiResponse}{status}{value}))
+    elsif (!$@ && exists($xml->{fsapiResponse}{status}{value}) && ('FS_TIMEOUT' eq $xml->{fsapiResponse}{status}{value}))
     {
       # do nothing here
     }
@@ -1783,9 +1786,14 @@ sub SIRD_ParseMultiple($$$)
 
       foreach (@{forcearray($xml->{fsapiGetMultipleResponse}{fsapiResponse})})
       {
-        if (exists($_->{node}) && exists($_->{status}) && exists($_->{value}) && ('FS_OK' eq $_->{status}{value}))
+        if (exists($_->{node}{value}) && exists($_->{status}{value}) && exists($_->{value}) && ('FS_OK' eq $_->{status}{value}))
         {
-          SIRD_SetReadings($hash, substr($_->{node}{value}, 10), $_);
+          eval{ SIRD_SetReadings($hash, substr($_->{node}{value}, 10), $_); };
+          
+          if ($@)
+          {
+            Log3 $name, 3, $name.': SetReading failed (please report this bug).'."\n".$xml."\n\nError: ".$@;
+          }
         }
       }
     }
@@ -1816,18 +1824,24 @@ sub SIRD_ParseGeneral($$$)
 
     eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
-    if (!$@ && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
+    if (!$@ && exists($xml->{fsapiResponse}{status}{value}) && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}) && 
+        exists($xml->{fsapiResponse}{node}{value}) && exists($xml->{fsapiResponse}{value}))
     {
       Log3 $name, 5, $name.': General '.$param->{cmd}.' successful.';
 
       if ('GET' eq $param->{cmd})
       {
         readingsBeginUpdate($hash);
-        SIRD_SetReadings($hash, substr($param->{request}, 10), $xml->{fsapiResponse});
+        eval { SIRD_SetReadings($hash, substr($param->{request}, 10), $xml->{fsapiResponse}); };
+        
+        if ($@)
+        {
+          Log3 $name, 3, $name.': SetReading failed (please report this bug).'."\n".$xml."\n\nError: ".$@;
+        }
         readingsEndUpdate($hash, 1);
       }
     }
-    elsif ($xml->{fsapiResponse}{status}{value} !~ /FS_NODE/)
+    elsif (exists($xml->{fsapiResponse}{status}{value}) && $xml->{fsapiResponse}{status}{value} !~ /FS_NODE/)
     {
       Log3 $name, 5, $name.': General '.$param->{request}.' failed.';
     }
@@ -1852,7 +1866,8 @@ sub SIRD_ParseLogin($$$)
 
     eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
-    if (!$@ && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
+    if (!$@ && exists($xml->{fsapiResponse}{status}{value}) && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}) &&
+        exists($xml->{fsapiResponse}{sessionId}{value}))
     {
       Log3 $name, 5, $name.': Login successful.';
 
@@ -1883,11 +1898,11 @@ sub SIRD_ParsePower($$$)
 
     eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
-    if (!$@ && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
+    if (!$@ && exists($xml->{fsapiResponse}{status}{value}) && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
     {
       Log3 $name, 5, $name.': Power '.$param->{cmd}.' successful.';
 
-      if ('GET' eq $param->{cmd})
+      if (('GET' eq $param->{cmd}) && exists($xml->{fsapiResponse}{value}->{u8}{value}))
       {
         readingsSingleUpdate($hash, 'power', (1 == $xml->{fsapiResponse}{value}->{u8}{value} ? 'on' : 'off'), 1);
         readingsSingleUpdate($hash, 'presence', 'present', 1);
@@ -1930,11 +1945,11 @@ sub SIRD_ParsePlay($$$)
 
     eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
-    if (!$@ && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
+    if (!$@ && exists($xml->{fsapiResponse}{status}{value}) && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
     {
       Log3 $name, 5, $name.': Play '.$param->{cmd}.' successful.';
 
-      if ('GET' eq $param->{cmd})
+      if (('GET' eq $param->{cmd}) && exists($xml->{fsapiResponse}{value}->{u8}{value}))
       {
         my @result = ('idle', 'buffering', 'playing', 'paused', 'rebuffering', 'error', 'stopped');
 
@@ -1979,13 +1994,13 @@ sub SIRD_ParseVolume($$$)
 
     eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
-    if (!$@ && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
+    if (!$@ && exists($xml->{fsapiResponse}{status}{value}) && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
     {
       my $volumeSteps = ReadingsVal($name, '.volumeSteps', 20);
 
       Log3 $name, 5, $name.': Volume '.$param->{cmd}.' successful.';
 
-      if ('GET' eq $param->{cmd})
+      if (('GET' eq $param->{cmd}) && exists($xml->{fsapiResponse}{value}->{u8}{value}))
       {
         readingsSingleUpdate($hash, 'volume', int($xml->{fsapiResponse}{value}->{u8}{value} * (100 / $volumeSteps)), 1) if (ReadingsVal($name, 'volume', -1) ne int($xml->{fsapiResponse}{value}->{u8}{value} * (100 / $volumeSteps)));
         readingsSingleUpdate($hash, 'volumeStraight', int($xml->{fsapiResponse}{value}->{u8}{value}), 1) if (ReadingsVal($name, 'volumeStraight', -1) ne int($xml->{fsapiResponse}{value}->{u8}{value}));
@@ -2021,11 +2036,11 @@ sub SIRD_ParseMute($$$)
 
     eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
-    if (!$@ && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
+    if (!$@ && exists($xml->{fsapiResponse}{status}{value}) && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
     {
       Log3 $name, 5, $name.': Mute '.$param->{cmd}.' successful.';
 
-      if ('GET' eq $param->{cmd})
+      if (('GET' eq $param->{cmd}) && exists($xml->{fsapiResponse}{value}->{u8}{value}))
       {
         readingsSingleUpdate($hash, 'mute', (1 == $xml->{fsapiResponse}{value}->{u8}{value} ? 'on' : 'off'), 1);
       }
@@ -2059,11 +2074,11 @@ sub SIRD_ParseShuffle($$$)
 
     eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
-    if (!$@ && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
+    if (!$@ && exists($xml->{fsapiResponse}{status}{value}) && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
     {
       Log3 $name, 5, $name.': Shuffle '.$param->{cmd}.' successful.';
 
-      if ('GET' eq $param->{cmd})
+      if (('GET' eq $param->{cmd}) && exists($xml->{fsapiResponse}{value}->{u8}{value}))
       {
         readingsSingleUpdate($hash, 'shuffle', (1 == $xml->{fsapiResponse}{value}->{u8}{value} ? 'on' : 'off'), 1);
       }
@@ -2097,11 +2112,11 @@ sub SIRD_ParseRepeat($$$)
 
     eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
-    if (!$@ && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
+    if (!$@ && exists($xml->{fsapiResponse}{status}{value}) && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
     {
       Log3 $name, 5, $name.': Repeat '.$param->{cmd}.' successful.';
 
-      if ('GET' eq $param->{cmd})
+      if (('GET' eq $param->{cmd}) && exists($xml->{fsapiResponse}{value}->{u8}{value}))
       {
         readingsSingleUpdate($hash, 'repeat', (1 == $xml->{fsapiResponse}{value}->{u8}{value} ? 'on' : 'off'), 1);
       }
@@ -2135,7 +2150,7 @@ sub SIRD_ParseNavState($$$)
 
     eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
-    if (!$@ && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
+    if (!$@ && exists($xml->{fsapiResponse}{status}{value}) && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
     {
       Log3 $name, 5, $name.': NavState '.$param->{cmd}.' successful.';
     }
@@ -2164,7 +2179,7 @@ sub SIRD_ParseInputs($$$)
 
     eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
-    if (!$@ && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
+    if (!$@ && exists($xml->{fsapiResponse}{status}{value}) && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
     {
       if ('SET' eq $param->{cmd})
       {
@@ -2181,19 +2196,30 @@ sub SIRD_ParseInputs($$$)
 
         Log3 $name, 5, $name.': Inputs '.$param->{cmd}.' successful.';
 
-        foreach my $item (@{forcearray($xml->{fsapiResponse}{item})})
+        eval
         {
-          if (exists($item->{key}) && exists($item->{field}))
+          if (exists($xml->{fsapiResponse}{item}))
           {
-            foreach my $field (@{forcearray($item->{field})})
+            foreach my $item (@{forcearray($xml->{fsapiResponse}{item})})
             {
-              if (exists($field->{name}) && ('label' eq $field->{name}{value}) && exists($field->{c8_array}{value}))
+              if (exists($item->{key}{value}) && exists($item->{field}))
               {
-                $inputs .= ',' if ('' ne $inputs);
-                $inputs .= $item->{key}{value}.':'.lc($field->{c8_array}{value});
+                foreach my $field (@{forcearray($item->{field})})
+                {
+                  if (exists($field->{name}{value}) && ('label' eq $field->{name}{value}) && exists($field->{c8_array}{value}))
+                  {
+                    $inputs .= ',' if ('' ne $inputs);
+                    $inputs .= $item->{key}{value}.':'.lc($field->{c8_array}{value});
+                  }
+                }
               }
             }
           }
+        };
+        
+        if ($@)
+        {
+          Log3 $name, 3, $name.': ParseInputs failed (please report this bug).'."\n".$xml."\n\nError: ".$@;
         }
 
         $inputs =~ s/\s//g;
@@ -2233,7 +2259,7 @@ sub SIRD_ParsePresets($$$)
 
     eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
-    if (!$@ && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
+    if (!$@ && exists($xml->{fsapiResponse}{status}{value}) && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
     {
       if ('SET' eq $param->{cmd})
       {
@@ -2254,22 +2280,33 @@ sub SIRD_ParsePresets($$$)
 
         Log3 $name, 5, $name.': Presets '.$param->{cmd}.' successful.';
 
-        foreach my $item (@{forcearray($xml->{fsapiResponse}{item})})
+        eval
         {
-          if (exists($item->{key}) && exists($item->{field}))
+          if (exists($xml->{fsapiResponse}{item}))
           {
-            foreach my $field (@{forcearray($item->{field})})
+            foreach my $item (@{forcearray($xml->{fsapiResponse}{item})})
             {
-              if (exists($field->{name}) && ('name' eq $field->{name}{value}) && exists($field->{c8_array}{value}))
+              if (exists($item->{key}{value}) && exists($item->{field}))
               {
-                $_ = $field->{c8_array}{value};
-                $_ =~ s/(?:\:|,)//g;
+                foreach my $field (@{forcearray($item->{field})})
+                {
+                  if (exists($field->{name}{value}) && ('name' eq $field->{name}{value}) && exists($field->{c8_array}{value}))
+                  {
+                    $_ = $field->{c8_array}{value};
+                    $_ =~ s/(?:\:|,)//g;
 
-                $presets .= ',' if ('' ne $presets);
-                $presets .= $item->{key}{value}.':'.$_;
+                    $presets .= ',' if ('' ne $presets);
+                    $presets .= $item->{key}{value}.':'.$_;
+                  }
+                }
               }
             }
           }
+        };
+        
+        if ($@)
+        {
+          Log3 $name, 3, $name.': ParsePresets failed (please report this bug).'."\n".$xml."\n\nError: ".$@;
         }
 
         $presets =~ s/\s//g;
@@ -2309,7 +2346,7 @@ sub SIRD_ParseNavigation($$$)
 
     eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
-    if (!$@ && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
+    if (!$@ && exists($xml->{fsapiResponse}{status}{value}) && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
     {
       if ('SET' eq $param->{cmd})
       {
@@ -2324,35 +2361,46 @@ sub SIRD_ParseNavigation($$$)
 
         Log3 $name, 5, $name.': Navigation '.$param->{cmd}.' successful.';
 
-        foreach my $item (@{forcearray($xml->{fsapiResponse}{item})})
+        eval
         {
-          if (exists($item->{key}) && exists($item->{field}))
+          if (exists($xml->{fsapiResponse}{item}))
           {
-            my $type = undef;
-            my $name = undef;
-
-            foreach my $field (@{forcearray($item->{field})})
+            foreach my $item (@{forcearray($xml->{fsapiResponse}{item})})
             {
-              if (exists($field->{name}) && ('name' eq $field->{name}{value}) && exists($field->{c8_array}{value}))
+              if (exists($item->{key}{value}) && exists($item->{field}))
               {
-                $_ = $field->{c8_array}{value};
-                $_ =~ s/[^0-9a-zA-Z\.\-\_]+//g;
+                my $type = undef;
+                my $name = undef;
 
-                $name = $item->{key}{value}.':'.$_;
+                foreach my $field (@{forcearray($item->{field})})
+                {
+                  if (exists($field->{name}{value}) && ('name' eq $field->{name}{value}) && exists($field->{c8_array}{value}))
+                  {
+                    $_ = $field->{c8_array}{value};
+                    $_ =~ s/[^0-9a-zA-Z\.\-\_]+//g;
+
+                    $name = $item->{key}{value}.':'.$_;
+                  }
+
+                  if (exists($field->{name}{value}) && ('type' eq $field->{name}{value}) && exists($field->{u8}{value}))
+                  {
+                    $type = $field->{u8}{value};
+                  }
+                }
+
+                if (defined($name) && defined($type))
+                {
+                  $nav .= ',' if ('' ne $nav);
+                  $nav .= $name.':'.$type;
+                }
               }
-
-              if (exists($field->{name}) && ('type' eq $field->{name}{value}))
-              {
-                $type = $field->{u8}{value};
-              }
-            }
-
-            if (defined($name) && defined($type))
-            {
-              $nav .= ',' if ('' ne $nav);
-              $nav .= $name.':'.$type;
             }
           }
+        };
+        
+        if ($@)
+        {
+          Log3 $name, 3, $name.': ParseNavigation failed (please report this bug).'."\n".$xml."\n\nError: ".$@;
         }
 
         $nav =~ s/\s//g;
@@ -2400,9 +2448,20 @@ sub SIRD_ParseDeviceInfo($$$)
 
     if (!$@)
     {
-      $hash->{MODEL} = encode_utf8(('' ne $xml->{root}{device}->{manufacturer}{value}) ? $xml->{root}{device}->{manufacturer}{value}.' ' : '').
-                       encode_utf8($xml->{root}{device}->{modelName}{value});
-      $hash->{UDN} = encode_utf8($xml->{root}{device}->{UDN}{value});
+      if (exists($xml->{root}{device}->{modelName}{value}))
+      {
+        $hash->{MODEL} = encode_utf8($xml->{root}{device}->{modelName}{value});
+        
+        if (exists($xml->{root}{device}->{manufacturer}{value}))
+        {
+          $hash->{MODEL} = encode_utf8(('' ne $xml->{root}{device}->{manufacturer}{value}) ? $xml->{root}{device}->{manufacturer}{value}.' ' : '').$hash->{MODEL};
+        }
+      }
+      
+      if (exists($xml->{root}{device}->{UDN}{value}))
+      {
+        $hash->{UDN} = encode_utf8($xml->{root}{device}->{UDN}{value});
+      }
     }
     else
     {
@@ -2465,7 +2524,7 @@ sub SIRD_DlnaPlay($$;$)
     }
     else
     {
-      Log3 $name, 5, $name.': DLNA Play '.Dumper($data);
+      Log3 $name, 5, $name.': DLNA Play '.$data;
     }
   }
 }
@@ -2506,7 +2565,7 @@ sub SIRD_DlnaStop($$;$)
     }
     else
     {
-      Log3 $name, 5, $name.': DLNA Stop '.Dumper($data);
+      Log3 $name, 5, $name.': DLNA Stop '.$data;
     }
   }
 }
@@ -2547,7 +2606,7 @@ sub SIRD_DlnaPause($$;$)
     }
     else
     {
-      Log3 $name, 5, $name.': DLNA Pause '.Dumper($data);
+      Log3 $name, 5, $name.': DLNA Pause '.$data;
     }
   }
 }
@@ -2588,7 +2647,7 @@ sub SIRD_DlnaNext($$;$)
     }
     else
     {
-      Log3 $name, 5, $name.': DLNA Next '.Dumper($data);
+      Log3 $name, 5, $name.': DLNA Next '.$data;
     }
   }
 }
@@ -2629,7 +2688,7 @@ sub SIRD_DlnaPrevious($$;$)
     }
     else
     {
-      Log3 $name, 5, $name.': DLNA Previous '.Dumper($data);
+      Log3 $name, 5, $name.': DLNA Previous '.$data;
     }
   }
 }
@@ -2671,8 +2730,8 @@ sub SIRD_DlnaSetAVTransportURI($$$;$)
     }
     else
     {
-      Log3 $name, 5, $name.': DLNA SetAVTransportURI '.Dumper($param);
-      Log3 $name, 5, $name.': DLNA SetAVTransportURI '.Dumper($data);
+      Log3 $name, 5, $name.': DLNA SetAVTransportURI '.$param;
+      Log3 $name, 5, $name.': DLNA SetAVTransportURI '.$data;
     }
   }
 }
@@ -2714,8 +2773,8 @@ sub SIRD_DlnaSetNextAVTransportURI($$$;$)
     }
     else
     {
-      Log3 $name, 5, $name.': DLNA SetNextAVTransportURI '.Dumper($param);
-      Log3 $name, 5, $name.': DLNA SetNextAVTransportURI '.Dumper($data);
+      Log3 $name, 5, $name.': DLNA SetNextAVTransportURI '.$param;
+      Log3 $name, 5, $name.': DLNA SetNextAVTransportURI '.$data;
     }
   }
 }
@@ -2756,7 +2815,7 @@ sub SIRD_DlnaGetTransportInfo($$;$)
     }
     else
     {
-      Log3 $name, 5, $name.': DLNA GetTransportInfo '.Dumper($data);
+      Log3 $name, 5, $name.': DLNA GetTransportInfo '.$data;
 
       if (($data =~ /<CurrentTransportStatus>OK<\/CurrentTransportStatus>/) &&
           ($data =~ /<CurrentTransportState>([A-Z_]+)<\/CurrentTransportState>/))
