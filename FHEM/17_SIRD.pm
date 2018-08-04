@@ -78,7 +78,7 @@ sub SIRD_Define($$)
   $hash->{IP} = $ip;
   $hash->{PIN} = $pin;
   $hash->{INTERVAL} = $interval;
-  $hash->{VERSION} = '1.1.9';
+  $hash->{VERSION} = '1.1.10';
 
   delete($hash->{helper}{suspendUpdate});
   delete($hash->{helper}{notifications});
@@ -1066,7 +1066,7 @@ sub SIRD_StartStream($$$$)
   # PowerOn,LoadStream,SetInput,PowerOff
   my $streamWaitTimes = AttrVal($name, 'streamWaitTimes', '0:1:0:0');
   my $power = ReadingsVal($name, 'power', 'on');
-
+  
   if (exists($hash->{helper}{PID_STREAM}))
   {
     Log3 $name, 3, $name.': Blocking call already running (stream).';
@@ -1084,6 +1084,8 @@ sub SIRD_DoStream(@)
   my ($name, $ip, $pin, $stream, $input, $streamInput, $power, $streamWaitTimes) = split("\\|", $string);
   my ($streamWait1, $streamWait2, $streamWait3, $streamWait4) = split("\\:", $streamWaitTimes);
   my $startTime;
+  my @files = ();
+  my $webserver = '';
 
   Log3 $name, 5, $name.': Blocking call running to stream.';
 
@@ -1105,7 +1107,46 @@ sub SIRD_DoStream(@)
 
   SIRD_DlnaStop($name, $ip);
 
-  SIRD_DlnaSetAVTransportURI($name, $ip, $stream);
+  if ($stream =~ /.m3u$/i)
+  {
+    Log3 $name, 3, $name.': Playlist detected.';
+    
+    if ($stream =~ /(^http:\/\/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+\/)/)
+    {
+      $webserver = $1;
+      
+      Log3 $name, 3, $name.': Webserver detected ('.$webserver.').';
+      
+      my $data = GetFileFromURL($stream, 5, '', 1, 5);
+      if ($data)
+      {
+        Log3 $name, 3, $name.": Content of playlist:\n".$data;
+        
+        @files = split("\n", $data);
+      
+        if (scalar(@files) > 0)
+        {
+          $_ = shift(@files);
+          $_ =~ s/\s+//g;
+          
+          Log3 $name, 3, $name.': Play file from playlist ('.$_.').';
+          
+          if ($_ =~ /^https?:\/\//i)
+          {
+            SIRD_DlnaSetAVTransportURI($name, $ip, $_);
+          }
+          else
+          {
+            SIRD_DlnaSetAVTransportURI($name, $ip, $webserver.$_);
+          }
+        }
+      }
+    }
+  }
+  else
+  {
+    SIRD_DlnaSetAVTransportURI($name, $ip, $stream);
+  }  
 
   $startTime = time();
   while (((time() - $startTime) < 5) && ('STOPPED' ne SIRD_DlnaGetTransportInfo($name, $ip))) {};
@@ -1120,7 +1161,33 @@ sub SIRD_DoStream(@)
   SIRD_DlnaPlay($name, $ip);
 
   while ('STOPPED' ne SIRD_DlnaGetTransportInfo($name, $ip)) {};
+  
+  if ($stream =~ /.m3u$/i)
+  {
+    foreach (@files)
+    {
+      $_ =~ s/\s+//g;
+      
+      Log3 $name, 3, $name.': Play file from playlist ('.$_.').';
+      
+      if ($_ =~ /^https?:\/\//i)
+      {
+        SIRD_DlnaSetAVTransportURI($name, $ip, $_);
+      }
+      else
+      {
+        SIRD_DlnaSetAVTransportURI($name, $ip, $webserver.$_);
+      }
+      
+      $startTime = time();
+      while (((time() - $startTime) < 5) && ('STOPPED' ne SIRD_DlnaGetTransportInfo($name, $ip))) {};
+      
+      SIRD_DlnaPlay($name, $ip);
 
+      while ('STOPPED' ne SIRD_DlnaGetTransportInfo($name, $ip)) {};
+    }
+  }
+    
   if ('' ne $streamInput)
   {
     SIRD_SendRequestBlocking($name, $ip, $pin, 'netRemote.sys.mode', $input, 'u32', 5);
@@ -1228,6 +1295,10 @@ sub SIRD_DoWebserver(@)
         elsif ('wav' eq $extension)
         {
           $client->send_header('Content-Type', 'audio/wav');
+        }
+        elsif ('m3u' eq $extension)
+        {
+          $client->send_header('Content-Type', 'audio/x-mpegurl');
         }
         else
         {

@@ -1,2 +1,1 @@
-- more checks for faulty xml added
-- v0.53 of XML::Bare or higher is required
+- playlist support added
