@@ -1896,7 +1896,7 @@ sub SIRD_ParseGeneral($$$)
     eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
     if (!$@ && exists($xml->{fsapiResponse}{status}{value}) && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}) && 
-        exists($xml->{fsapiResponse}{node}{value}) && exists($xml->{fsapiResponse}{value}))
+        exists($xml->{fsapiResponse}{value}))
     {
       Log3 $name, 5, $name.': General '.$param->{cmd}.' successful.';
 
