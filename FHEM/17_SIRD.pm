@@ -69,16 +69,18 @@ sub SIRD_Define($$)
 
   my ($name, $type, $ip, $pin, $interval) = @args;
 
-  return 'Please enter a valid ip address ('.$ip.').' if ($ip !~ /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/);
+  return 'Please enter a valid ip address ('.$ip.').' if ($ip !~ /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?:\:\d+)?$/);
   return 'Please enter a valid pin (4 digits).' if ($pin !~ /^\d\d\d\d$/);
   return 'The update interval must be a number and has to be at least 5s if compatibility mode is disabled and '.
          '10s if enabled (the interval will be set to 10s automatically if compatibility mode is enabled).' if (($interval !~ /^\d+$/) || ($interval < 5));
 
+  $ip .= ':80' if ($ip =~ /\:\d+$/);
+  
   $hash->{NOTIFYDEV} = 'global';
   $hash->{IP} = $ip;
   $hash->{PIN} = $pin;
   $hash->{INTERVAL} = $interval;
-  $hash->{VERSION} = '1.1.11';
+  $hash->{VERSION} = '1.1.12';
 
   delete($hash->{helper}{suspendUpdate});
   delete($hash->{helper}{notifications});
@@ -133,6 +135,8 @@ sub SIRD_Notify($$)
 
       if (defined($ip))
       {
+        $ip =~ s/\:\d+$//;
+        
         my $param = {
                       url        => 'http://'.$ip.':8080/dd.xml',
                       timeout    => 6,
@@ -714,7 +718,7 @@ sub SIRD_DoNavigation(@)
       sleep($wait);
     }
 
-    $data = GetFileFromURL('http://'.$ip.':80/fsapi/GET/netRemote.nav.numItems?pin='.$pin, 5, '', 1, 5);
+    $data = GetFileFromURL('http://'.$ip.'/fsapi/GET/netRemote.nav.numItems?pin='.$pin, 5, '', 1, 5);
     if ($data && ($data =~ /fsapiResponse/))
     {
       eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
@@ -738,7 +742,7 @@ sub SIRD_DoNavigation(@)
     {
       while (($lastNumNav < ($index + $maxNavigationItems)) && ($lastNumNav < $numNav))
       {
-        $data = GetFileFromURL('http://'.$ip.':80/fsapi/LIST_GET_NEXT/netRemote.nav.list/'.$lastNumNav.'?pin='.$pin.'&maxItems=50', 10, '', 1, 5);
+        $data = GetFileFromURL('http://'.$ip.'/fsapi/LIST_GET_NEXT/netRemote.nav.list/'.$lastNumNav.'?pin='.$pin.'&maxItems=50', 10, '', 1, 5);
         if ($data && ($data =~ /fsapiResponse/))
         {
           Log3 $name, 5, $name.': data = '.$data;
@@ -1696,7 +1700,7 @@ sub SIRD_SendRequest($$$$$$;$)
     }
 
     my $param = {
-                  url        => 'http://'.$ip.':80/fsapi/'.$_,
+                  url        => 'http://'.$ip.'/fsapi/'.$_,
                   timeout    => (0 == $keepalive ? 6 : 60),
                   keepalive  => $keepalive,
                   hash       => $hash,
@@ -1734,7 +1738,7 @@ sub SIRD_SendRequestBlocking($$$$$$$)
 
   do
   {
-    $data = GetFileFromURL('http://'.$ip.':80/fsapi/SET/'.$request.'?pin='.$pin.'&value='.$value, 5, '', 1, 5);
+    $data = GetFileFromURL('http://'.$ip.'/fsapi/SET/'.$request.'?pin='.$pin.'&value='.$value, 5, '', 1, 5);
     if ($data && ($data =~ /fsapiResponse/))
     {
       eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
@@ -1745,7 +1749,7 @@ sub SIRD_SendRequestBlocking($$$$$$$)
 
         do
         {
-          $data = GetFileFromURL('http://'.$ip.':80/fsapi/GET/'.$request.'?pin='.$pin, 5, '', 1, 5);
+          $data = GetFileFromURL('http://'.$ip.'/fsapi/GET/'.$request.'?pin='.$pin, 5, '', 1, 5);
           if ($data && ($data =~ /fsapiResponse/))
           {
             eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
@@ -2567,6 +2571,9 @@ sub SIRD_DlnaPlay($$;$)
 {
   my ($name, $ip, $isNonBlocking) = @_;
   my $hash = $defs{$name};
+  
+  $ip =~ s/\:\d+$//;
+  
   my $param = {
                 url        => 'http://'.$ip.':8080/AVTransport/control',
                 timeout    => 10,
@@ -2608,6 +2615,9 @@ sub SIRD_DlnaStop($$;$)
 {
   my ($name, $ip, $isNonBlocking) = @_;
   my $hash = $defs{$name};
+  
+  $ip =~ s/\:\d+$//;
+  
   my $param = {
                 url        => 'http://'.$ip.':8080/AVTransport/control',
                 timeout    => 10,
@@ -2649,6 +2659,9 @@ sub SIRD_DlnaPause($$;$)
 {
   my ($name, $ip, $isNonBlocking) = @_;
   my $hash = $defs{$name};
+  
+  $ip =~ s/\:\d+$//;
+  
   my $param = {
                 url        => 'http://'.$ip.':8080/AVTransport/control',
                 timeout    => 10,
@@ -2690,6 +2703,9 @@ sub SIRD_DlnaNext($$;$)
 {
   my ($name, $ip, $isNonBlocking) = @_;
   my $hash = $defs{$name};
+  
+  $ip =~ s/\:\d+$//;
+  
   my $param = {
                 url        => 'http://'.$ip.':8080/AVTransport/control',
                 timeout    => 10,
@@ -2731,6 +2747,9 @@ sub SIRD_DlnaPrevious($$;$)
 {
   my ($name, $ip, $isNonBlocking) = @_;
   my $hash = $defs{$name};
+  
+  $ip =~ s/\:\d+$//;
+  
   my $param = {
                 url        => 'http://'.$ip.':8080/AVTransport/control',
                 timeout    => 10,
@@ -2772,6 +2791,9 @@ sub SIRD_DlnaSetAVTransportURI($$$;$)
 {
   my ($name, $ip, $stream, $isNonBlocking) = @_;
   my $hash = $defs{$name};
+  
+  $ip =~ s/\:\d+$//;
+  
   my $param = {
                 url        => 'http://'.$ip.':8080/AVTransport/control',
                 timeout    => 10,
@@ -2815,6 +2837,9 @@ sub SIRD_DlnaSetNextAVTransportURI($$$;$)
 {
   my ($name, $ip, $stream, $isNonBlocking) = @_;
   my $hash = $defs{$name};
+  
+  $ip =~ s/\:\d+$//;
+  
   my $param = {
                 url        => 'http://'.$ip.':8080/AVTransport/control',
                 timeout    => 10,
@@ -2858,6 +2883,9 @@ sub SIRD_DlnaGetTransportInfo($$;$)
 {
   my ($name, $ip, $isNonBlocking) = @_;
   my $hash = $defs{$name};
+  
+  $ip =~ s/\:\d+$//;
+  
   my $param = {
                 url        => 'http://'.$ip.':8080/AVTransport/control',
                 timeout    => 10,
@@ -2934,9 +2962,12 @@ sub SIRD_DlnaGetTransportInfo($$;$)
   <ul><br>
     <code>define &lt;name&gt; SIRD &lt;ip&gt; &lt;pin&gt; &lt;interval&gt;</code>
     <br><br>
+    Some radios require an additional port such as 2244.
+    <br><br>
     Example:
     <ul><br>
       <code>define MySird SIRD 192.168.1.100 1234 10</code><br>
+      <code>define MySird SIRD 192.168.1.100:2244 1234 10</code><br>
     </ul>
     <br>
     tbd
