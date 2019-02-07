@@ -1463,7 +1463,7 @@ sub SIRD_Update($)
     unshift(@SIRD_queue, ['GET', 'netRemote.nav.numItems', 0, \&SIRD_ParseGeneral]);
 
     # run dequeue
-    SIRD_DeQueue($name);
+    SIRD_DeQueue($hash);
 
     unshift(@SIRD_queue, ['GET', 'netRemote.sys.mode', 0, \&SIRD_ParseGeneral]);
     unshift(@SIRD_queue, ['GET', 'netRemote.sys.info.version', 0, \&SIRD_ParseGeneral]);
