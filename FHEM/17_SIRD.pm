@@ -52,6 +52,7 @@ sub SIRD_Initialize($)
                         'streamWaitTimes '.
                         'streamPath '.
                         'streamPort '.
+                        'upnpPort '.
                         'updateAfterSet:0,1 '.
                         'notifications:0,1 '.
                         $readingFnAttributes;
@@ -74,8 +75,6 @@ sub SIRD_Define($$)
   return 'The update interval must be a number and has to be at least 5s if compatibility mode is disabled and '.
          '10s if enabled (the interval will be set to 10s automatically if compatibility mode is enabled).' if (($interval !~ /^\d+$/) || ($interval < 5));
 
-  $ip .= ':80' if ($ip =~ /\:\d+$/);
-  
   $hash->{NOTIFYDEV} = 'global';
   $hash->{IP} = $ip;
   $hash->{PIN} = $pin;
@@ -106,8 +105,17 @@ sub SIRD_Undefine($$)
   SetExtensionsCancel($hash);
   BlockingKill($hash->{helper}{PID_NAVIGATION}) if (defined($hash->{helper}{PID_NAVIGATION}));
   BlockingKill($hash->{helper}{PID_SPEAK}) if (defined($hash->{helper}{PID_SPEAK}));
-  BlockingKill($hash->{helper}{PID_STREAM}) if (defined($hash->{helper}{PID_STREAM}));
+  #BlockingKill($hash->{helper}{PID_STREAM}) if (defined($hash->{helper}{PID_STREAM}));
+  if (defined($hash->{helper}{PID_STREAM}))
+  {
+    $hash->{helper}{PID_STREAM}->terminate();
+    $hash->{helper}{PID_STREAM}->wait();
+  }
   BlockingKill($hash->{helper}{PID_WEBSERVER}) if (defined($hash->{helper}{PID_WEBSERVER}));
+  delete($hash->{helper}{PID_NAVIGATION});
+  delete($hash->{helper}{PID_SPEAK});
+  delete($hash->{helper}{PID_STREAM});
+  delete($hash->{helper}{PID_WEBSERVER});
   HttpUtils_Close($hash);
 
   return undef;
@@ -132,13 +140,14 @@ sub SIRD_Notify($$)
         !defined(InternalVal($name, 'UDN', undef)))
     {
       my $ip = InternalVal($name, 'IP', undef);
+      my $port = AttrVal($name, 'upnpPort', '8080');
 
       if (defined($ip))
       {
         $ip =~ s/\:\d+$//;
-        
+
         my $param = {
-                      url        => 'http://'.$ip.':8080/dd.xml',
+                      url        => 'http://'.$ip.':'.$port.'/dd.xml',
                       timeout    => 6,
                       hash       => $hash,
                       method     => 'GET',
@@ -249,6 +258,14 @@ sub SIRD_Attr($$$$) {
         return 'streamPath must end with /';
       }
     }
+    elsif (('streamPort' eq $attribute) ||
+           ('upnpPort' eq $attribute))
+    {
+      if ($value !~ /^\d+$/)
+      {
+        return 'port must be a number';
+      }
+    }
   }
 
   return undef;
@@ -308,6 +325,8 @@ sub SIRD_Set($$@) {
   {
     if (defined($hash->{helper}{PID_STREAM}) && defined($ip))
     {
+      my $subprocess = $hash->{helper}{PID_STREAM};
+
       if ('stop' eq $cmd)
       {
         SIRD_DlnaStop($name, $ip, 1);
@@ -322,11 +341,13 @@ sub SIRD_Set($$@) {
       }
       elsif ('next' eq $cmd)
       {
-        SIRD_DlnaNext($name, $ip, 1);
+        $subprocess->writeToChild('NEXT');
+        #SIRD_DlnaNext($name, $ip, 1);
       }
       elsif ('previous' eq $cmd)
       {
-        SIRD_DlnaPrevious($name, $ip, 1);
+        $subprocess->writeToChild('PREVIOUS');
+        #SIRD_DlnaPrevious($name, $ip, 1);
       }
     }
     else
@@ -471,7 +492,7 @@ sub SIRD_Set($$@) {
                                          PeerAddr => '8.8.8.8',
                                          PeerPort => '53');
       my $ip = $socket->sockhost;
-      
+
       close($socket);
 
       SIRD_StartWebserver($hash, $streamPort, $streamPath);
@@ -638,8 +659,6 @@ sub SIRD_SetNextTimer($$)
 
   Log3 $name, 5, $name.': SetNextTimer called';
 
-  RemoveInternalTimer($hash);
-
   if (!defined($timer))
   {
     $interval = 10 if (($interval < 10) && (0 != $compatibilityMode));
@@ -655,14 +674,18 @@ sub SIRD_SetNextTimer($$)
 
 sub SIRD_DeQueue($)
 {
-  my ($name) = @_;
-  my $hash = $defs{$name};
+  my ($hash) = @_;
+  my $name = $hash->{NAME};
   my $numEntries = (scalar(@SIRD_queue) < 5 ? scalar(@SIRD_queue) : 5);
 
-  Log3 $name, 3, $name.': Queue full. Update interval MUST be increased!' if (scalar(@SIRD_queue) > 100);
+  if (scalar(@SIRD_queue) > 100)
+  {
+    Log3 $name, 3, $name.': Queue full. Update interval MUST be increased!';
 
-  RemoveInternalTimer($name);
-  InternalTimer(gettimeofday() + 1, 'SIRD_DeQueue', $name, 0) if (scalar(@SIRD_queue) > 0);
+    splice(@SIRD_queue, 0, scalar(@SIRD_queue) - 100);
+  }
+
+  InternalTimer(gettimeofday() + 1, 'SIRD_DeQueue', $hash, 0) if (scalar(@SIRD_queue) > 0);
 
   # send max 5 requests each second
   for (my $i = 0; $i < $numEntries; $i++)
@@ -1063,6 +1086,8 @@ sub SIRD_AbortSpeak($)
 
 sub SIRD_StartStream($$$$)
 {
+  require "SubProcess.pm";
+
   my ($hash, $stream, $input, $streamInput) = @_;
   my $name = $hash->{NAME};
   my $ip = InternalVal($name, 'IP', '127.0.0.1');
@@ -1070,28 +1095,86 @@ sub SIRD_StartStream($$$$)
   # PowerOn,LoadStream,SetInput,PowerOff
   my $streamWaitTimes = AttrVal($name, 'streamWaitTimes', '0:1:0:0');
   my $power = ReadingsVal($name, 'power', 'on');
-  
+
   if (exists($hash->{helper}{PID_STREAM}))
   {
     Log3 $name, 3, $name.': Blocking call already running (stream).';
 
-    BlockingKill($hash->{helper}{PID_STREAM}) if (defined($hash->{helper}{PID_STREAM}));
+    #BlockingKill($hash->{helper}{PID_STREAM}) if (defined($hash->{helper}{PID_STREAM}));
+    return undef;
   }
 
-  $hash->{helper}{PID_STREAM} = BlockingCall('SIRD_DoStream', $name.'|'.$ip.'|'.$pin.'|'.$stream.'|'.$input.'|'.$streamInput.'|'.$power.'|'.$streamWaitTimes, 'SIRD_EndStream');
+  #$hash->{helper}{PID_STREAM} = BlockingCall('SIRD_DoStream', $name.'|'.$ip.'|'.$pin.'|'.$stream.'|'.$input.'|'.$streamInput.'|'.$power.'|'.$streamWaitTimes, 'SIRD_EndStream');
+  my $subprocess = SubProcess->new({ onRun => \&SIRD_DoStream });
+  $subprocess->{name} = $name;
+  $subprocess->{ip} = $ip;
+  $subprocess->{pin} = $pin;
+  $subprocess->{stream} = $stream;
+  $subprocess->{input} = $input;
+  $subprocess->{streamInput} = $streamInput;
+  $subprocess->{power} = $power;
+  $subprocess->{streamWaitTimes} = $streamWaitTimes;
+  my $pid = $subprocess->run();
+
+  if (!defined($pid))
+  {
+    Log3 $name, 1, $name.': Start of stream failed!';
+
+    delete($hash->{helper}{PID_STREAM});
+    return undef;
+  }
+
+  $hash->{helper}{PID_STREAM} = $subprocess;
+
+  InternalTimer(gettimeofday() + 1, 'SIRD_PollStream', $hash, 0);
 }
 
 
-sub SIRD_DoStream(@)
+sub SIRD_PollStream($)
 {
-  my ($string) = @_;
-  my ($name, $ip, $pin, $stream, $input, $streamInput, $power, $streamWaitTimes) = split("\\|", $string);
+  my ($hash) = @_;
+  my $name = $hash->{NAME};
+  my $subprocess = $hash->{helper}{PID_STREAM};
+  my $readFromChild = $subprocess->readFromChild();
+
+  if (!defined($readFromChild))
+  {
+    InternalTimer(gettimeofday() + 1, 'SIRD_PollStream', $hash, 0);
+  }
+  else
+  {
+    $subprocess->wait();
+    BlockingKill($hash->{helper}{PID_WEBSERVER}) if (defined($hash->{helper}{PID_WEBSERVER}));
+    delete($hash->{helper}{PID_WEBSERVER});
+    delete($hash->{helper}{PID_STREAM});
+
+    Log3 $name, 3, $name.': SubProcess finished to stream.';
+  }
+}
+
+
+sub SIRD_DoStream()
+{
+  #my ($string) = @_;
+  #my ($name, $ip, $pin, $stream, $input, $streamInput, $power, $streamWaitTimes) = split("\\|", $string);
+  my $subprocess = shift;
+  my $name = $subprocess->{name};
+  my $ip = $subprocess->{ip};
+  my $pin = $subprocess->{pin};
+  my $stream = $subprocess->{stream};
+  my $input = $subprocess->{input};
+  my $streamInput = $subprocess->{streamInput};
+  my $power = $subprocess->{power};
+  my $streamWaitTimes = $subprocess->{streamWaitTimes};
   my ($streamWait1, $streamWait2, $streamWait3, $streamWait4) = split("\\:", $streamWaitTimes);
   my $startTime;
   my @files = ();
   my $webserver = '';
+  my $i;
+  my $transportInfo;
+  my $readFromParent;
 
-  Log3 $name, 5, $name.': Blocking call running to stream.';
+  Log3 $name, 3, $name.': SubProcess running to stream.';
 
   if ('off' eq $power)
   {
@@ -1114,27 +1197,29 @@ sub SIRD_DoStream(@)
   if ($stream =~ /.m3u$/i)
   {
     Log3 $name, 3, $name.': Playlist detected.';
-    
+
     if ($stream =~ /(^http:\/\/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+\/)/)
     {
       $webserver = $1;
-      
+
       Log3 $name, 3, $name.': Webserver detected ('.$webserver.').';
-      
+
       my $data = GetFileFromURL($stream, 5, '', 1, 5);
       if ($data)
       {
+        my $firstRun = 1;
+
         Log3 $name, 3, $name.": Content of playlist:\n".$data;
-        
+
         @files = split("\n", $data);
-      
-        if (scalar(@files) > 0)
+
+        for ($i = 0; $i < scalar(@files); $i++)
         {
-          $_ = shift(@files);
+          $_ = $files[$i];
           $_ =~ s/\s+//g;
-          
+
           Log3 $name, 3, $name.': Play file from playlist ('.$_.').';
-          
+
           if ($_ =~ /^https?:\/\//i)
           {
             SIRD_DlnaSetAVTransportURI($name, $ip, $_);
@@ -1143,6 +1228,49 @@ sub SIRD_DoStream(@)
           {
             SIRD_DlnaSetAVTransportURI($name, $ip, $webserver.$_);
           }
+
+          $startTime = time();
+          while (((time() - $startTime) < 5) && ('STOPPED' ne SIRD_DlnaGetTransportInfo($name, $ip))) {};
+
+          if (1 == $firstRun)
+          {
+            if ('off' eq $power)
+            {
+              SIRD_SendRequestBlocking($name, $ip, $pin, 'netRemote.sys.audio.mute', 0, 'u8', 5);
+            }
+
+            sleep($streamWait2) if ($streamWait2 > 0);
+
+            $firstRun = 0;
+          }
+
+          SIRD_DlnaPlay($name, $ip);
+
+          do
+          {
+            $transportInfo = SIRD_DlnaGetTransportInfo($name, $ip);
+            $readFromParent = $subprocess->readFromParent();
+
+            #Log3 $name, 3, $name.': '.$transportInfo;
+            #Log3 $name, 3, $name.': '.$readFromParent if (defined($readFromParent));
+          } while (('STOPPED' ne $transportInfo) &&
+                   (!defined($readFromParent)));
+
+          last if ('STOPPED' eq $transportInfo);
+
+          if ('PREVIOUS' eq $readFromParent)
+          {
+            if ($i >= 1)
+            {
+              $i -= 2;
+            }
+            else
+            {
+              $i--;
+            }
+          }
+
+          SIRD_DlnaStop($name, $ip);
         }
       }
     }
@@ -1150,48 +1278,22 @@ sub SIRD_DoStream(@)
   else
   {
     SIRD_DlnaSetAVTransportURI($name, $ip, $stream);
-  }  
 
-  $startTime = time();
-  while (((time() - $startTime) < 5) && ('STOPPED' ne SIRD_DlnaGetTransportInfo($name, $ip))) {};
+    $startTime = time();
+    while (((time() - $startTime) < 5) && ('STOPPED' ne SIRD_DlnaGetTransportInfo($name, $ip))) {};
 
-  if ('off' eq $power)
-  {
-    SIRD_SendRequestBlocking($name, $ip, $pin, 'netRemote.sys.audio.mute', 0, 'u8', 5);
-  }
-
-  sleep($streamWait2) if ($streamWait2 > 0);
-
-  SIRD_DlnaPlay($name, $ip);
-
-  while ('STOPPED' ne SIRD_DlnaGetTransportInfo($name, $ip)) {};
-  
-  if ($stream =~ /.m3u$/i)
-  {
-    foreach (@files)
+    if ('off' eq $power)
     {
-      $_ =~ s/\s+//g;
-      
-      Log3 $name, 3, $name.': Play file from playlist ('.$_.').';
-      
-      if ($_ =~ /^https?:\/\//i)
-      {
-        SIRD_DlnaSetAVTransportURI($name, $ip, $_);
-      }
-      else
-      {
-        SIRD_DlnaSetAVTransportURI($name, $ip, $webserver.$_);
-      }
-      
-      $startTime = time();
-      while (((time() - $startTime) < 5) && ('STOPPED' ne SIRD_DlnaGetTransportInfo($name, $ip))) {};
-      
-      SIRD_DlnaPlay($name, $ip);
-
-      while ('STOPPED' ne SIRD_DlnaGetTransportInfo($name, $ip)) {};
+      SIRD_SendRequestBlocking($name, $ip, $pin, 'netRemote.sys.audio.mute', 0, 'u8', 5);
     }
+
+    sleep($streamWait2) if ($streamWait2 > 0);
+
+    SIRD_DlnaPlay($name, $ip);
+
+    while ('STOPPED' ne SIRD_DlnaGetTransportInfo($name, $ip)) {};
   }
-    
+
   if ('' ne $streamInput)
   {
     SIRD_SendRequestBlocking($name, $ip, $pin, 'netRemote.sys.mode', $input, 'u32', 5);
@@ -1206,7 +1308,8 @@ sub SIRD_DoStream(@)
     sleep($streamWait4) if ($streamWait4 > 0);
   }
 
-  return $name;
+  #return $name;
+  $subprocess->writeToParent('STOPPED');
 }
 
 
@@ -1241,7 +1344,7 @@ sub SIRD_StartWebserver($$$)
   my ($hash, $port, $path) = @_;
   my $name = $hash->{NAME};
 
-  if (exists($hash->{helper}{PID_WEBSERVER}))
+  if (defined($hash->{helper}{PID_WEBSERVER}))
   {
     Log3 $name, 3, $name.': Blocking call already running (webserver).';
 
@@ -1252,22 +1355,12 @@ sub SIRD_StartWebserver($$$)
 }
 
 
-sub SIRD_DoWebserver(@)
+sub SIRD_DoWebserver($)
 {
   my ($string) = @_;
   my ($name, $port, $path) = split("\\|", $string);
 
   Log3 $name, 5, $name.': Blocking call running: webserver.';
-
-  #if (-e $attr{global}{modpath}.'/FHEM/lib/SIRD_Webserver.pl')
-  #{
-  #  Log3 $name, 3, $name.': External webserver started ('.$attr{global}{modpath}.'/FHEM/lib/SIRD_Webserver.pl).';
-  #
-    # replace process to save memory
-  #  exec('perl /opt/fhem/FHEM/lib/SIRD_Webserver.pl', qw($port, $path)) or die(1);
-  #}
-
-  #Log3 $name, 3, $name.': Internal webserver started.';
 
   my $daemon = HTTP::Daemon->new(LocalPort => $port, ReuseAddr => 1, Timeout => 300) or return $name;
 
@@ -1324,7 +1417,7 @@ sub SIRD_DoWebserver(@)
 
     Log3 $name, 5, $name.': Connection closed';
   }
-  
+
   Log3 $name, 5, $name.': Webserver closed';
 
   return $name;
@@ -1396,8 +1489,16 @@ sub SIRD_Update($)
     SIRD_SendRequest($hash, 'LIST_GET_NEXT', 'netRemote.sys.caps.validModes/-1', 65536, 0, \&SIRD_ParseInputs);
   }
   SIRD_SendRequest($hash, 'LIST_GET_NEXT', 'netRemote.nav.presets/-1', 20, 0, \&SIRD_ParsePresets);
+}
 
-  if ('on' eq ReadingsVal($name, 'power', 'unknown'))
+
+sub SIRD_UpdateAdditional($)
+{
+  my ($hash) = @_;
+  my $name = $hash->{NAME};
+  my $power = ReadingsVal($name, 'power', '');
+
+  if ('on' eq $power)
   {
     if (1 == AttrVal($name, 'compatibilityMode', 1))
     {
@@ -1461,13 +1562,13 @@ sub SIRD_Update($)
     readingsEndUpdate($hash, 1);
   }
 
-  if ('' eq ReadingsVal($name, 'power', ''))
+  if ('' eq $power)
   {
     readingsSingleUpdate($hash, 'state', 'absent', 1);
   }
   else
   {
-    readingsSingleUpdate($hash, 'state', ReadingsVal($name, 'power', ''), 1);
+    readingsSingleUpdate($hash, 'state', $power, 1);
   }
 }
 
@@ -1505,7 +1606,7 @@ sub SIRD_SetReadings($$$)
   my $reading = '';
 
   return if (('HASH' ne ref($node)) || ('HASH' ne ref($node->{value})));
-  
+
   if (('nav.state' eq $nodeName) && exists($node->{value}->{u8}{value}) && (0 == $node->{value}->{u8}{value}))
   {
     # enable navigation if needed!!!
@@ -1760,7 +1861,7 @@ sub SIRD_SendRequestBlocking($$$$$$$)
               if ($value == $xml->{fsapiResponse}{value}->{$type}{value})
               {
                 Log3 $name, 5, $name.': successfully completed ('.$request.' value='.$value.').';
-                
+
                 $isDone = 1;
               }
             }
@@ -1768,7 +1869,7 @@ sub SIRD_SendRequestBlocking($$$$$$$)
         } while (((time() - $startTime) < $timeout) && (0 == $isDone));
       }
     }
-    
+
     $retry++;
   } while (($retry < 3) && (0 == $isDone));
 }
@@ -1792,7 +1893,7 @@ sub SIRD_ParseNotifies($$$)
 
     eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
-    if (!$@ && ('HASH' eq ref($xml)) && exists($xml->{fsapiResponse}{status}{value}) && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}) && 
+    if (!$@ && ('HASH' eq ref($xml)) && exists($xml->{fsapiResponse}{status}{value}) && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}) &&
         exists($xml->{fsapiResponse}{notify}))
     {
       Log3 $name, 5, $name.': Notifications '.$param->{cmd}.' successful.';
@@ -1867,7 +1968,7 @@ sub SIRD_ParseMultiple($$$)
         if (('HASH' eq ref($_)) && exists($_->{node}{value}) && exists($_->{status}{value}) && exists($_->{value}) && ('FS_OK' eq $_->{status}{value}))
         {
           eval{ SIRD_SetReadings($hash, substr($_->{node}{value}, 10), $_); };
-          
+
           if ($@)
           {
             Log3 $name, 3, $name.': SetReading failed (please report this bug).'."\n".$xml."\n\nError: ".$@;
@@ -1902,7 +2003,7 @@ sub SIRD_ParseGeneral($$$)
 
     eval {my $ob = XML::Bare->new(text => $data); $xml = $ob->parse();};
 
-    if (!$@ && ('HASH' eq ref($xml)) && exists($xml->{fsapiResponse}{status}{value}) && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}) && 
+    if (!$@ && ('HASH' eq ref($xml)) && exists($xml->{fsapiResponse}{status}{value}) && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}) &&
         exists($xml->{fsapiResponse}{value}))
     {
       Log3 $name, 5, $name.': General '.$param->{cmd}.' successful.';
@@ -1911,7 +2012,7 @@ sub SIRD_ParseGeneral($$$)
       {
         readingsBeginUpdate($hash);
         eval { SIRD_SetReadings($hash, substr($param->{request}, 10), $xml->{fsapiResponse}); };
-        
+
         if ($@)
         {
           Log3 $name, 3, $name.': SetReading failed (please report this bug).'."\n".$xml."\n\nError: ".$@;
@@ -1979,11 +2080,13 @@ sub SIRD_ParsePower($$$)
     if (!$@ && ('HASH' eq ref($xml)) && exists($xml->{fsapiResponse}{status}{value}) && ('FS_OK' eq $xml->{fsapiResponse}{status}{value}))
     {
       Log3 $name, 5, $name.': Power '.$param->{cmd}.' successful.';
-      
+
       if (('GET' eq $param->{cmd}) && ('HASH' eq ref($xml->{fsapiResponse}{value})) && exists($xml->{fsapiResponse}{value}->{u8}{value}))
       {
         readingsSingleUpdate($hash, 'power', (1 == $xml->{fsapiResponse}{value}->{u8}{value} ? 'on' : 'off'), 1);
         readingsSingleUpdate($hash, 'presence', 'present', 1);
+
+        SIRD_UpdateAdditional($hash);
       }
       elsif ('SET' eq $param->{cmd})
       {
@@ -1995,6 +2098,8 @@ sub SIRD_ParsePower($$$)
     {
       readingsSingleUpdate($hash, 'power', '', 1);
       readingsSingleUpdate($hash, 'presence', 'absent', 1);
+
+      SIRD_UpdateAdditional($hash);
 
       if (1 == AttrVal($name, 'autoLogin', 1))
       {
@@ -2294,7 +2399,7 @@ sub SIRD_ParseInputs($$$)
             }
           }
         };
-        
+
         if ($@)
         {
           Log3 $name, 3, $name.': ParseInputs failed (please report this bug).'."\n".$xml."\n\nError: ".$@;
@@ -2381,7 +2486,7 @@ sub SIRD_ParsePresets($$$)
             }
           }
         };
-        
+
         if ($@)
         {
           Log3 $name, 3, $name.': ParsePresets failed (please report this bug).'."\n".$xml."\n\nError: ".$@;
@@ -2475,7 +2580,7 @@ sub SIRD_ParseNavigation($$$)
             }
           }
         };
-        
+
         if ($@)
         {
           Log3 $name, 3, $name.': ParseNavigation failed (please report this bug).'."\n".$xml."\n\nError: ".$@;
@@ -2529,13 +2634,13 @@ sub SIRD_ParseDeviceInfo($$$)
       if (('HASH' eq ref($xml->{root}{device})) && exists($xml->{root}{device}->{modelName}{value}))
       {
         $hash->{MODEL} = encode_utf8($xml->{root}{device}->{modelName}{value});
-        
+
         if (('HASH' eq ref($xml->{root}{device})) && exists($xml->{root}{device}->{manufacturer}{value}))
         {
           $hash->{MODEL} = encode_utf8(('' ne $xml->{root}{device}->{manufacturer}{value}) ? $xml->{root}{device}->{manufacturer}{value}.' ' : '').$hash->{MODEL};
         }
       }
-      
+
       if (('HASH' eq ref($xml->{root}{device})) && exists($xml->{root}{device}->{UDN}{value}))
       {
         $hash->{UDN} = encode_utf8($xml->{root}{device}->{UDN}{value});
@@ -2571,11 +2676,12 @@ sub SIRD_DlnaPlay($$;$)
 {
   my ($name, $ip, $isNonBlocking) = @_;
   my $hash = $defs{$name};
-  
+  my $port = AttrVal($name, 'upnpPort', '8080');
+
   $ip =~ s/\:\d+$//;
-  
+
   my $param = {
-                url        => 'http://'.$ip.':8080/AVTransport/control',
+                url        => 'http://'.$ip.':'.$port.'/AVTransport/control',
                 timeout    => 10,
                 header     => { 'Content-Type' => 'text/xml; charset="utf-8"',
                                 'SOAPAction' => '"urn:schemas-upnp-org:service:AVTransport:1#Play"' },
@@ -2615,11 +2721,12 @@ sub SIRD_DlnaStop($$;$)
 {
   my ($name, $ip, $isNonBlocking) = @_;
   my $hash = $defs{$name};
-  
+  my $port = AttrVal($name, 'upnpPort', '8080');
+
   $ip =~ s/\:\d+$//;
-  
+
   my $param = {
-                url        => 'http://'.$ip.':8080/AVTransport/control',
+                url        => 'http://'.$ip.':'.$port.'/AVTransport/control',
                 timeout    => 10,
                 header     => { 'Content-Type' => 'text/xml; charset="utf-8"',
                                 'SOAPAction' => '"urn:schemas-upnp-org:service:AVTransport:1#Stop"' },
@@ -2659,11 +2766,12 @@ sub SIRD_DlnaPause($$;$)
 {
   my ($name, $ip, $isNonBlocking) = @_;
   my $hash = $defs{$name};
-  
+  my $port = AttrVal($name, 'upnpPort', '8080');
+
   $ip =~ s/\:\d+$//;
-  
+
   my $param = {
-                url        => 'http://'.$ip.':8080/AVTransport/control',
+                url        => 'http://'.$ip.':'.$port.'/AVTransport/control',
                 timeout    => 10,
                 header     => { 'Content-Type' => 'text/xml; charset="utf-8"',
                                 'SOAPAction' => '"urn:schemas-upnp-org:service:AVTransport:1#Pause"' },
@@ -2703,11 +2811,12 @@ sub SIRD_DlnaNext($$;$)
 {
   my ($name, $ip, $isNonBlocking) = @_;
   my $hash = $defs{$name};
-  
+  my $port = AttrVal($name, 'upnpPort', '8080');
+
   $ip =~ s/\:\d+$//;
-  
+
   my $param = {
-                url        => 'http://'.$ip.':8080/AVTransport/control',
+                url        => 'http://'.$ip.':'.$port.'/AVTransport/control',
                 timeout    => 10,
                 header     => { 'Content-Type' => 'text/xml; charset="utf-8"',
                                 'SOAPAction' => '"urn:schemas-upnp-org:service:AVTransport:1#Next"' },
@@ -2747,11 +2856,12 @@ sub SIRD_DlnaPrevious($$;$)
 {
   my ($name, $ip, $isNonBlocking) = @_;
   my $hash = $defs{$name};
-  
+  my $port = AttrVal($name, 'upnpPort', '8080');
+
   $ip =~ s/\:\d+$//;
-  
+
   my $param = {
-                url        => 'http://'.$ip.':8080/AVTransport/control',
+                url        => 'http://'.$ip.':'.$port.'/AVTransport/control',
                 timeout    => 10,
                 header     => { 'Content-Type' => 'text/xml; charset="utf-8"',
                                 'SOAPAction' => '"urn:schemas-upnp-org:service:AVTransport:1#Previous"' },
@@ -2791,11 +2901,12 @@ sub SIRD_DlnaSetAVTransportURI($$$;$)
 {
   my ($name, $ip, $stream, $isNonBlocking) = @_;
   my $hash = $defs{$name};
-  
+  my $port = AttrVal($name, 'upnpPort', '8080');
+
   $ip =~ s/\:\d+$//;
-  
+
   my $param = {
-                url        => 'http://'.$ip.':8080/AVTransport/control',
+                url        => 'http://'.$ip.':'.$port.'/AVTransport/control',
                 timeout    => 10,
                 header     => { 'Content-Type' => 'text/xml; charset="utf-8"',
                                 'SOAPAction' => '"urn:schemas-upnp-org:service:AVTransport:1#SetAVTransportURI"' },
@@ -2837,11 +2948,12 @@ sub SIRD_DlnaSetNextAVTransportURI($$$;$)
 {
   my ($name, $ip, $stream, $isNonBlocking) = @_;
   my $hash = $defs{$name};
-  
+  my $port = AttrVal($name, 'upnpPort', '8080');
+
   $ip =~ s/\:\d+$//;
-  
+
   my $param = {
-                url        => 'http://'.$ip.':8080/AVTransport/control',
+                url        => 'http://'.$ip.':'.$port.'/AVTransport/control',
                 timeout    => 10,
                 header     => { 'Content-Type' => 'text/xml; charset="utf-8"',
                                 'SOAPAction' => '"urn:schemas-upnp-org:service:AVTransport:1#SetNextAVTransportURI"' },
@@ -2883,11 +2995,12 @@ sub SIRD_DlnaGetTransportInfo($$;$)
 {
   my ($name, $ip, $isNonBlocking) = @_;
   my $hash = $defs{$name};
-  
+  my $port = AttrVal($name, 'upnpPort', '8080');
+
   $ip =~ s/\:\d+$//;
-  
+
   my $param = {
-                url        => 'http://'.$ip.':8080/AVTransport/control',
+                url        => 'http://'.$ip.':'.$port.'/AVTransport/control',
                 timeout    => 10,
                 header     => { 'Content-Type' => 'text/xml; charset="utf-8"',
                                 'SOAPAction' => '"urn:schemas-upnp-org:service:AVTransport:1#GetTransportInfo"' },
@@ -2962,7 +3075,7 @@ sub SIRD_DlnaGetTransportInfo($$;$)
   <ul><br>
     <code>define &lt;name&gt; SIRD &lt;ip&gt; &lt;pin&gt; &lt;interval&gt;</code>
     <br><br>
-    Some radios require an additional port such as 2244.
+    Some radios require an additional port such as 2244. In such a case the upnpPort must be set to 80 too most of the time.
     <br><br>
     Example:
     <ul><br>
@@ -3025,6 +3138,7 @@ sub SIRD_DlnaGetTransportInfo($$;$)
     <li><b>streamWaitTimes:</b> wait times for stream output (default: 0:1:0:0 = PowerOn,LoadStream,SetInput,PowerOff)<br></li>
     <li><b>streamPath:</b> local path to stream media files from (default: /opt/fhem/www/)<br></li>
     <li><b>streamPort:</b> port for webserver to stream local media files (default: 5000)<br></li>
+    <li><b>upnpPort:</b> port for Upnp commands used by speak and stream (default: 8080). Must be set to 80 for some radios.<br></li>
     <li><b>updateAfterSet:</b> enable or disable the update of all readings after any set command was triggered (default: enabled)<br></li>
     <li><b>notifications:</b> Enable or disable notifications (default: disabled). It may be that you will get some readings faster if this feature is enabled (noticeable for big update cycles only).<br></li>
     <br>
