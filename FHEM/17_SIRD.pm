@@ -17,6 +17,7 @@ use XML::Bare 0.53 qw(forcearray);
 use URI::Escape;
 use HTTP::Daemon;
 use IO::Socket::INET;
+use Socket;
 #use Data::Dumper;
 
 use HttpUtils;
@@ -41,6 +42,7 @@ sub SIRD_Initialize($)
   $hash->{AttrList}   = 'disable:0,1 '.
                         'autoLogin:0,1 '.
                         'compatibilityMode:0,1 '.
+                        'idleInterval '.
                         'playCommands '.
                         'maxNavigationItems '.
                         'ttsInput '.
@@ -79,7 +81,7 @@ sub SIRD_Define($$)
   $hash->{IP} = $ip;
   $hash->{PIN} = $pin;
   $hash->{INTERVAL} = $interval;
-  $hash->{VERSION} = '1.1.12';
+  $hash->{VERSION} = '1.1.13';
 
   delete($hash->{helper}{suspendUpdate});
   delete($hash->{helper}{notifications});
@@ -112,10 +114,12 @@ sub SIRD_Undefine($$)
     $hash->{helper}{PID_STREAM}->wait();
   }
   BlockingKill($hash->{helper}{PID_WEBSERVER}) if (defined($hash->{helper}{PID_WEBSERVER}));
+  BlockingKill($hash->{helper}{PID_SSDP_DISCOVER}) if (defined($hash->{helper}{PID_SSDP_DISCOVER}));
   delete($hash->{helper}{PID_NAVIGATION});
   delete($hash->{helper}{PID_SPEAK});
   delete($hash->{helper}{PID_STREAM});
   delete($hash->{helper}{PID_WEBSERVER});
+  delete($hash->{helper}{PID_SSDP_DISCOVER});
   HttpUtils_Close($hash);
 
   return undef;
@@ -140,21 +144,10 @@ sub SIRD_Notify($$)
         !defined(InternalVal($name, 'UDN', undef)))
     {
       my $ip = InternalVal($name, 'IP', undef);
-      my $port = AttrVal($name, 'upnpPort', '8080');
 
       if (defined($ip))
       {
-        $ip =~ s/\:\d+$//;
-
-        my $param = {
-                      url        => 'http://'.$ip.':'.$port.'/dd.xml',
-                      timeout    => 6,
-                      hash       => $hash,
-                      method     => 'GET',
-                      callback   => \&SIRD_ParseDeviceInfo
-                    };
-
-        HttpUtils_NonblockingGet($param);
+        SIRD_StartSsdpDiscover($hash);
       }
     }
 
@@ -179,7 +172,7 @@ sub SIRD_Attr($$$$) {
       }
       else
       {
-        SIRD_SetNextTimer($hash, 0);
+        SIRD_Update($hash);
 
         readingsSingleUpdate($hash, 'state', 'Initialized', 1);
       }
@@ -266,6 +259,13 @@ sub SIRD_Attr($$$$) {
         return 'port must be a number';
       }
     }
+    elsif ('idleInterval' eq $attribute)
+    {
+      if (($value !~ /^\d+$/) || ($value < $hash->{INTERVAL}))
+      {
+        return 'idleInterval must be a number and >= INTERVAL';
+      }
+    }
   }
 
   return undef;
@@ -342,12 +342,10 @@ sub SIRD_Set($$@) {
       elsif ('next' eq $cmd)
       {
         $subprocess->writeToChild('NEXT');
-        #SIRD_DlnaNext($name, $ip, 1);
       }
       elsif ('previous' eq $cmd)
       {
         $subprocess->writeToChild('PREVIOUS');
-        #SIRD_DlnaPrevious($name, $ip, 1);
       }
     }
     else
@@ -655,13 +653,19 @@ sub SIRD_SetNextTimer($$)
   my ($hash, $timer) = @_;
   my $name = $hash->{NAME};
   my $interval = InternalVal($name, 'INTERVAL', 30);
+  my $idleInterval = AttrVal($name, 'idleInterval', $interval);
   my $compatibilityMode = AttrVal($name, 'compatibilityMode', 1);
+  my $power = ReadingsVal($name, 'power', 'on');
 
   Log3 $name, 5, $name.': SetNextTimer called';
+
+  RemoveInternalTimer($hash, 'SIRD_Update');
 
   if (!defined($timer))
   {
     $interval = 10 if (($interval < 10) && (0 != $compatibilityMode));
+
+    $interval = $idleInterval if (('on' ne $power) && ($idleInterval >= $interval));
 
     InternalTimer(gettimeofday() + $interval, 'SIRD_Update', $hash, 0);
   }
@@ -685,8 +689,6 @@ sub SIRD_DeQueue($)
     splice(@SIRD_queue, 0, scalar(@SIRD_queue) - 100);
   }
 
-  InternalTimer(gettimeofday() + 1, 'SIRD_DeQueue', $hash, 0) if (scalar(@SIRD_queue) > 0);
-
   # send max 5 requests each second
   for (my $i = 0; $i < $numEntries; $i++)
   {
@@ -694,6 +696,8 @@ sub SIRD_DeQueue($)
 
     SIRD_SendRequest($hash, $_[0], $_[1], $_[2], 0, $_[3]);
   }
+
+  InternalTimer(gettimeofday() + 1, 'SIRD_DeQueue', $hash, 0) if (scalar(@SIRD_queue) > 0);
 }
 
 
@@ -1148,7 +1152,7 @@ sub SIRD_PollStream($)
     delete($hash->{helper}{PID_WEBSERVER});
     delete($hash->{helper}{PID_STREAM});
 
-    Log3 $name, 3, $name.': SubProcess finished to stream.';
+    Log3 $name, 5, $name.': SubProcess finished to stream.';
   }
 }
 
@@ -1174,7 +1178,7 @@ sub SIRD_DoStream()
   my $transportInfo;
   my $readFromParent;
 
-  Log3 $name, 3, $name.': SubProcess running to stream.';
+  Log3 $name, 5, $name.': SubProcess running to stream.';
 
   if ('off' eq $power)
   {
@@ -1196,20 +1200,20 @@ sub SIRD_DoStream()
 
   if ($stream =~ /.m3u$/i)
   {
-    Log3 $name, 3, $name.': Playlist detected.';
+    Log3 $name, 5, $name.': Playlist detected.';
 
     if ($stream =~ /(^http:\/\/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+\/)/)
     {
       $webserver = $1;
 
-      Log3 $name, 3, $name.': Webserver detected ('.$webserver.').';
+      Log3 $name, 5, $name.': Webserver detected ('.$webserver.').';
 
       my $data = GetFileFromURL($stream, 5, '', 1, 5);
       if ($data)
       {
         my $firstRun = 1;
 
-        Log3 $name, 3, $name.": Content of playlist:\n".$data;
+        Log3 $name, 5, $name.": Content of playlist:\n".$data;
 
         @files = split("\n", $data);
 
@@ -1218,7 +1222,7 @@ sub SIRD_DoStream()
           $_ = $files[$i];
           $_ =~ s/\s+//g;
 
-          Log3 $name, 3, $name.': Play file from playlist ('.$_.').';
+          Log3 $name, 5, $name.': Play file from playlist ('.$_.').';
 
           if ($_ =~ /^https?:\/\//i)
           {
@@ -1313,29 +1317,132 @@ sub SIRD_DoStream()
 }
 
 
-sub SIRD_EndStream($)
+#sub SIRD_EndStream($)
+#{
+#  my ($name) = @_;
+#  my $hash = $defs{$name};
+
+#  BlockingKill($hash->{helper}{PID_WEBSERVER}) if (defined($hash->{helper}{PID_WEBSERVER}));
+#  delete($hash->{helper}{PID_WEBSERVER});
+#  delete($hash->{helper}{PID_STREAM});
+
+#  Log3 $name, 5, $name.': Blocking call finished to stream.';
+#}
+
+
+#sub SIRD_AbortStream($)
+#{
+#  my ($hash) = @_;
+#  my $name = $hash->{NAME};
+
+#  BlockingKill($hash->{helper}{PID_WEBSERVER}) if (defined($hash->{helper}{PID_WEBSERVER}));
+#  delete($hash->{helper}{PID_WEBSERVER});
+#  delete($hash->{helper}{PID_STREAM});
+
+#  Log3 $name, 3, $name.': Blocking call aborted (stream).';
+#}
+
+
+sub SIRD_StartSsdpDiscover($)
 {
-  my ($name) = @_;
-  my $hash = $defs{$name};
+  my ($hash) = @_;
+  my $name = $hash->{NAME};
+  my $ip = InternalVal($name, 'IP', '127.0.0.1');
 
-  BlockingKill($hash->{helper}{PID_WEBSERVER}) if (defined($hash->{helper}{PID_WEBSERVER}));
-  delete($hash->{helper}{PID_WEBSERVER});
-  delete($hash->{helper}{PID_STREAM});
+  if (defined($hash->{helper}{PID_SSDP_DISCOVER}))
+  {
+    Log3 $name, 3, $name.': Blocking call already running (ssdp discover).';
 
-  Log3 $name, 5, $name.': Blocking call finished to stream.';
+    BlockingKill($hash->{helper}{PID_SSDP_DISCOVER}) if (defined($hash->{helper}{PID_SSDP_DISCOVER}));
+  }
+
+  $hash->{helper}{PID_SSDP_DISCOVER} = BlockingCall('SIRD_DoSsdpDiscover', $name.'|'.$ip, 'SIRD_EndSsdpDiscover', 60, 'SIRD_AbortSsdpDiscover', $hash);
 }
 
 
-sub SIRD_AbortStream($)
+sub SIRD_DoSsdpDiscover($)
+{
+  my ($string) = @_;
+  my ($name, $ip) = split("\\|", $string);
+  my $socket;
+  my $addr = pack_sockaddr_in(1900, inet_aton('239.255.255.250'));
+  my $discoverMsg = "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 3\r\nST: urn:schemas-upnp-org:service:AVTransport:1";
+  my $data;
+  my $startTime = time();
+  my $upnpPort = '';
+  my $udn = '';
+  my $deviceUrl = '';
+
+  Log3 $name, 5, $name.': Blocking call running: ssdp discover.';
+
+  $ip =~ s/\:\d+$//;
+
+  socket($socket, AF_INET, SOCK_DGRAM, 0);
+  setsockopt($socket, SOL_SOCKET, SO_BROADCAST, 1);
+  bind($socket, pack_sockaddr_in(0, INADDR_ANY));
+  send($socket, $discoverMsg, 0, $addr);
+
+  do
+  {
+	  $data = '';
+
+	  recv($socket, $data, 4096, 0);
+
+    Log3 $name, 5, $name.": Device discovered:\n".$data;
+  } while (($data !~ /$ip/) && ((time() - $startTime) < 30));
+
+  close($socket);
+
+  if ($data =~ /(uuid:[^:]+):/i)
+  {
+    $udn = $1;
+  }
+
+  if ($data =~ /^LOCATION:\s+(http:\/\/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(\:\d+)?.*)$/mi)
+  {
+    $upnpPort = $2 if (defined($2));
+    $deviceUrl = $1;
+  }
+
+  Log3 $name, 5, $name.': ssdp discover closed';
+
+  return $name.'|'.$upnpPort.'|'.$udn.'|'.$deviceUrl;
+}
+
+
+sub SIRD_EndSsdpDiscover($)
+{
+  my ($string) = @_;
+  my ($name, $upnpPort, $udn, $deviceUrl) = split("\\|", $string);
+  my $hash = $defs{$name};
+
+  if ('' ne $deviceUrl)
+  {
+    my $param = {
+                  url        => $deviceUrl,
+                  timeout    => 6,
+                  hash       => $hash,
+                  method     => 'GET',
+                  callback   => \&SIRD_ParseDeviceInfo
+                };
+
+    HttpUtils_NonblockingGet($param);
+  }
+
+  delete($hash->{helper}{PID_SSDP_DISCOVER});
+
+  Log3 $name, 5, $name.': Blocking call finished to ssdp discover.';
+}
+
+
+sub SIRD_AbortSsdpDiscover($)
 {
   my ($hash) = @_;
   my $name = $hash->{NAME};
 
-  BlockingKill($hash->{helper}{PID_WEBSERVER}) if (defined($hash->{helper}{PID_WEBSERVER}));
-  delete($hash->{helper}{PID_WEBSERVER});
-  delete($hash->{helper}{PID_STREAM});
+  delete($hash->{helper}{PID_SSDP_DISCOVER});
 
-  Log3 $name, 3, $name.': Blocking call aborted (stream).';
+  Log3 $name, 3, $name.': Blocking call aborted (ssdp discover).';
 }
 
 
@@ -1496,79 +1603,60 @@ sub SIRD_UpdateAdditional($)
 {
   my ($hash) = @_;
   my $name = $hash->{NAME};
-  my $power = ReadingsVal($name, 'power', '');
 
-  if ('on' eq $power)
+  if (1 == AttrVal($name, 'compatibilityMode', 1))
   {
-    if (1 == AttrVal($name, 'compatibilityMode', 1))
-    {
-      unshift(@SIRD_queue, ['GET', 'netRemote.play.info.description', 0, \&SIRD_ParseGeneral]);
-      unshift(@SIRD_queue, ['GET', 'netRemote.play.info.albumDescription', 0, \&SIRD_ParseGeneral]);
-      unshift(@SIRD_queue, ['GET', 'netRemote.play.info.artistDescription', 0, \&SIRD_ParseGeneral]);
-      unshift(@SIRD_queue, ['GET', 'netRemote.play.info.duration', 0, \&SIRD_ParseGeneral]);
-      unshift(@SIRD_queue, ['GET', 'netRemote.play.info.artist', 0, \&SIRD_ParseGeneral]);
-      unshift(@SIRD_queue, ['GET', 'netRemote.play.info.album', 0, \&SIRD_ParseGeneral]);
-      unshift(@SIRD_queue, ['GET', 'netRemote.play.info.name', 0, \&SIRD_ParseGeneral]);
-      unshift(@SIRD_queue, ['GET', 'netRemote.play.info.graphicUri', 0, \&SIRD_ParseGeneral]);
-      unshift(@SIRD_queue, ['GET', 'netRemote.play.info.text', 0, \&SIRD_ParseGeneral]);
-      unshift(@SIRD_queue, ['GET', 'netRemote.nav.numItems', 0, \&SIRD_ParseGeneral]);
-      unshift(@SIRD_queue, ['GET', 'netRemote.play.status', 0, \&SIRD_ParseGeneral]);
-      unshift(@SIRD_queue, ['GET', 'netRemote.play.frequency', 0, \&SIRD_ParseGeneral]);
-      unshift(@SIRD_queue, ['GET', 'netRemote.play.errorStr', 0, \&SIRD_ParseGeneral]);
-      unshift(@SIRD_queue, ['GET', 'netRemote.play.position', 0, \&SIRD_ParseGeneral]);
-      unshift(@SIRD_queue, ['GET', 'netRemote.play.repeat', 0, \&SIRD_ParseGeneral]);
-      unshift(@SIRD_queue, ['GET', 'netRemote.play.shuffle', 0, \&SIRD_ParseGeneral]);
-      unshift(@SIRD_queue, ['GET', 'netRemote.play.signalStrength', 0, \&SIRD_ParseGeneral]);
-      unshift(@SIRD_queue, ['GET', 'netRemote.sys.audio.mute', 0, \&SIRD_ParseGeneral]);
-    }
-    else
-    {
-      SIRD_SendRequest($hash, 'GET_MULTIPLE', 'node=netRemote.play.info.name&'.
-                                              'node=netRemote.play.info.description&'.
-                                              'node=netRemote.play.info.albumDescription&'.
-                                              'node=netRemote.play.info.artistDescription&'.
-                                              'node=netRemote.play.info.duration&'.
-                                              'node=netRemote.play.info.artist&'.
-                                              'node=netRemote.play.info.album&'.
-                                              'node=netRemote.play.info.graphicUri&'.
-                                              'node=netRemote.play.info.text&'.
-                                              'node=netRemote.nav.numItems&', 0, 0, \&SIRD_ParseMultiple);
-
-      SIRD_SendRequest($hash, 'GET_MULTIPLE', 'node=netRemote.sys.mode&'.
-                                              'node=netRemote.play.status&'.
-                                              'node=netRemote.play.frequency&'.
-                                              'node=netRemote.play.errorStr&'.
-                                              'node=netRemote.play.position&'.
-                                              'node=netRemote.play.repeat&'.
-                                              'node=netRemote.play.shuffle&'.
-                                              'node=netRemote.play.signalStrength&'.
-                                              'node=netRemote.sys.audio.mute&', 0, 0, \&SIRD_ParseMultiple);
-
-      #SIRD_SendRequest($hash, 'GET_MULTIPLE', 'node=netRemote.multiroom.group.name&'.
-      #                                        'node=netRemote.multiroom.group.id&'.
-      #                                        'node=netRemote.multiroom.group.state&'.
-      #                                        'node=netRemote.multiroom.device.serverStatus&'.
-      #                                        'node=netRemote.multiroom.caps.maxClients&', 0, 0, \&SIRD_ParseMultiple);
-
-      #SIRD_SendRequest($hash, 'GET_MULTIPLE', 'node=netRemote.multichannel.system.name&'.
-      #                                        'node=netRemote.multichannel.system.id&'.
-      #                                        'node=netRemote.multichannel.system.state&', 0, 0, \&SIRD_ParseMultiple);
-    }
+    unshift(@SIRD_queue, ['GET', 'netRemote.play.info.description', 0, \&SIRD_ParseGeneral]);
+    unshift(@SIRD_queue, ['GET', 'netRemote.play.info.albumDescription', 0, \&SIRD_ParseGeneral]);
+    unshift(@SIRD_queue, ['GET', 'netRemote.play.info.artistDescription', 0, \&SIRD_ParseGeneral]);
+    unshift(@SIRD_queue, ['GET', 'netRemote.play.info.duration', 0, \&SIRD_ParseGeneral]);
+    unshift(@SIRD_queue, ['GET', 'netRemote.play.info.artist', 0, \&SIRD_ParseGeneral]);
+    unshift(@SIRD_queue, ['GET', 'netRemote.play.info.album', 0, \&SIRD_ParseGeneral]);
+    unshift(@SIRD_queue, ['GET', 'netRemote.play.info.name', 0, \&SIRD_ParseGeneral]);
+    unshift(@SIRD_queue, ['GET', 'netRemote.play.info.graphicUri', 0, \&SIRD_ParseGeneral]);
+    unshift(@SIRD_queue, ['GET', 'netRemote.play.info.text', 0, \&SIRD_ParseGeneral]);
+    unshift(@SIRD_queue, ['GET', 'netRemote.nav.numItems', 0, \&SIRD_ParseGeneral]);
+    unshift(@SIRD_queue, ['GET', 'netRemote.play.status', 0, \&SIRD_ParseGeneral]);
+    unshift(@SIRD_queue, ['GET', 'netRemote.play.frequency', 0, \&SIRD_ParseGeneral]);
+    unshift(@SIRD_queue, ['GET', 'netRemote.play.errorStr', 0, \&SIRD_ParseGeneral]);
+    unshift(@SIRD_queue, ['GET', 'netRemote.play.position', 0, \&SIRD_ParseGeneral]);
+    unshift(@SIRD_queue, ['GET', 'netRemote.play.repeat', 0, \&SIRD_ParseGeneral]);
+    unshift(@SIRD_queue, ['GET', 'netRemote.play.shuffle', 0, \&SIRD_ParseGeneral]);
+    unshift(@SIRD_queue, ['GET', 'netRemote.play.signalStrength', 0, \&SIRD_ParseGeneral]);
+    unshift(@SIRD_queue, ['GET', 'netRemote.sys.audio.mute', 0, \&SIRD_ParseGeneral]);
   }
   else
   {
-    readingsBeginUpdate($hash);
-    SIRD_ClearReadings($hash);
-    readingsEndUpdate($hash, 1);
-  }
+    SIRD_SendRequest($hash, 'GET_MULTIPLE', 'node=netRemote.play.info.name&'.
+                                            'node=netRemote.play.info.description&'.
+                                            'node=netRemote.play.info.albumDescription&'.
+                                            'node=netRemote.play.info.artistDescription&'.
+                                            'node=netRemote.play.info.duration&'.
+                                            'node=netRemote.play.info.artist&'.
+                                            'node=netRemote.play.info.album&'.
+                                            'node=netRemote.play.info.graphicUri&'.
+                                            'node=netRemote.play.info.text&'.
+                                            'node=netRemote.nav.numItems&', 0, 0, \&SIRD_ParseMultiple);
 
-  if ('' eq $power)
-  {
-    readingsSingleUpdate($hash, 'state', 'absent', 1);
-  }
-  else
-  {
-    readingsSingleUpdate($hash, 'state', $power, 1);
+    SIRD_SendRequest($hash, 'GET_MULTIPLE', 'node=netRemote.sys.mode&'.
+                                            'node=netRemote.play.status&'.
+                                            'node=netRemote.play.frequency&'.
+                                            'node=netRemote.play.errorStr&'.
+                                            'node=netRemote.play.position&'.
+                                            'node=netRemote.play.repeat&'.
+                                            'node=netRemote.play.shuffle&'.
+                                            'node=netRemote.play.signalStrength&'.
+                                            'node=netRemote.sys.audio.mute&', 0, 0, \&SIRD_ParseMultiple);
+
+    #SIRD_SendRequest($hash, 'GET_MULTIPLE', 'node=netRemote.multiroom.group.name&'.
+    #                                        'node=netRemote.multiroom.group.id&'.
+    #                                        'node=netRemote.multiroom.group.state&'.
+    #                                        'node=netRemote.multiroom.device.serverStatus&'.
+    #                                        'node=netRemote.multiroom.caps.maxClients&', 0, 0, \&SIRD_ParseMultiple);
+
+    #SIRD_SendRequest($hash, 'GET_MULTIPLE', 'node=netRemote.multichannel.system.name&'.
+    #                                        'node=netRemote.multichannel.system.id&'.
+    #                                        'node=netRemote.multichannel.system.state&', 0, 0, \&SIRD_ParseMultiple);
   }
 }
 
@@ -2086,20 +2174,38 @@ sub SIRD_ParsePower($$$)
         readingsSingleUpdate($hash, 'power', (1 == $xml->{fsapiResponse}{value}->{u8}{value} ? 'on' : 'off'), 1);
         readingsSingleUpdate($hash, 'presence', 'present', 1);
 
-        SIRD_UpdateAdditional($hash);
+        if (1 == $xml->{fsapiResponse}{value}->{u8}{value})
+        {
+          SIRD_UpdateAdditional($hash);
+        }
+        else
+        {
+          readingsBeginUpdate($hash);
+          SIRD_ClearReadings($hash);
+          readingsEndUpdate($hash, 1);
+        }
+
+        readingsSingleUpdate($hash, 'state', (1 == $xml->{fsapiResponse}{value}->{u8}{value} ? 'on' : 'off'), 1);
       }
       elsif ('SET' eq $param->{cmd})
       {
+        my $power = ReadingsVal($name, 'power', 'off');
+
         readingsSingleUpdate($hash, 'power', (1 == $param->{value} ? 'on' : 'off'), 1);
         readingsSingleUpdate($hash, 'presence', 'present', 1);
+
+        # restart timer in case of switch from off to on
+        if (('off' eq $power) && (1 == $param->{value}))
+        {
+          SIRD_Update($hash);
+        }
       }
     }
     else
     {
       readingsSingleUpdate($hash, 'power', '', 1);
       readingsSingleUpdate($hash, 'presence', 'absent', 1);
-
-      SIRD_UpdateAdditional($hash);
+      readingsSingleUpdate($hash, 'state', 'absent', 1);
 
       if (1 == AttrVal($name, 'autoLogin', 1))
       {
@@ -3128,6 +3234,7 @@ sub SIRD_DlnaGetTransportInfo($$;$)
     <li><b>autoLogin:</b> module tries to automatically login into the radio if needed (default: auto login activated)<br></li>
     <li><b>playCommands:</b> can be used to define the mapping of play commands (default: 0:stop,1:play,2:pause,3:next,4:previous)<br></li>
     <li><b>compatibilityMode:</b> This mode is activated by default and should work for all radios. It is highly recommended to disable the compatibility mode if possible because it needs a lot of ressources.<br></li>
+    <li><b>idleInterval:</b> update interval to be used if radio is powered off (default: same as interval)<br></li>
     <li><b>maxNavigationItems:</b> maximum number of navigation items to get by each ls command (default: 100)<br></li>
     <li><b>ttsInput:</b> input for text to speech (default: dmr)<br></li>
     <li><b>ttsLanguage:</b> language setting for text to speech output (default: de)<br></li>
