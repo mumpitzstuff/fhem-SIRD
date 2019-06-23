@@ -2158,13 +2158,11 @@ sub SIRD_ParsePower($$$)
   if ('' ne $err)
   {
     Log3 $name, 5, $name.': Error while requesting '.$param->{url}.' - '.$err;
-    if ($param->{errno} == 113) { # 113: EHOSTUNREACH - No route to host.
-      readingsBeginUpdate($hash);
-      readingsBulkUpdate($hash, 'power', '');
-      readingsBulkUpdate($hash, 'presence', 'absent');
-      readingsBulkUpdate($hash, 'state', 'absent');
-      readingsEndUpdate($hash, 1);
-    }
+    readingsBeginUpdate($hash);
+    readingsBulkUpdate($hash, 'power', '');
+    readingsBulkUpdate($hash, 'presence', 'absent');
+    readingsBulkUpdate($hash, 'state', 'absent');
+    readingsEndUpdate($hash, 1);
   }
   elsif ('' ne $data)
   {
